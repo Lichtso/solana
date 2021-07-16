@@ -5855,8 +5855,7 @@ dependencies = [
 [[package]]
 name = "solana_rbpf"
 version = "0.2.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc1dced9892c2b0273318ef4d8486112ea7c7a7b8eb563a20e7858ad921b4719"
+source = "git+https://github.com/solana-labs/rbpf?branch=feature/address_translation_cleanup#5e99071b79cb5d34b04303c44884e2887e6696dc"
 dependencies = [
  "byteorder",
  "combine",

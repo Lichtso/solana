@@ -16,9 +16,8 @@ use log::{log_enabled, trace, Level::Trace};
 use solana_measure::measure::Measure;
 use solana_rbpf::{
     aligned_memory::AlignedMemory,
-    ebpf::{HOST_ALIGN, MM_HEAP_START},
+    ebpf::HOST_ALIGN,
     error::{EbpfError, UserDefinedError},
-    memory_region::MemoryRegion,
     static_analysis::Analysis,
     verifier::{self, VerifierError},
     vm::{Config, EbpfVm, Executable, InstructionMeter},
@@ -98,10 +97,8 @@ pub fn create_executor(
         )
     }
     .map_err(|e| map_ebpf_error(invoke_context, e))?;
-    let (_, elf_bytes) = executable
-        .get_text_bytes()
-        .map_err(|e| map_ebpf_error(invoke_context, e))?;
-    verifier::check(elf_bytes)
+    let text_bytes = executable.get_text_bytes().1;
+    verifier::check(text_bytes)
         .map_err(|e| map_ebpf_error(invoke_context, EbpfError::UserError(e.into())))?;
     if use_jit {
         if let Err(err) = executable.jit_compile() {
@@ -150,12 +147,11 @@ pub fn create_vm<'a>(
     invoke_context: &'a mut dyn InvokeContext,
 ) -> Result<EbpfVm<'a, BpfError, ThisInstructionMeter>, EbpfError<BpfError>> {
     let bpf_compute_budget = invoke_context.get_bpf_compute_budget();
-    let heap = AlignedMemory::new_with_size(
+    let mut heap = AlignedMemory::new_with_size(
         bpf_compute_budget.heap_size.unwrap_or(HEAP_LENGTH),
         HOST_ALIGN,
     );
-    let heap_region = MemoryRegion::new_from_slice(heap.as_slice(), MM_HEAP_START, 0, true);
-    let mut vm = EbpfVm::new(program, parameter_bytes, &[heap_region])?;
+    let mut vm = EbpfVm::new(program, heap.as_slice_mut(), parameter_bytes)?;
     syscalls::bind_syscall_context_objects(loader_id, &mut vm, invoke_context, heap)?;
     Ok(vm)
 }
