@@ -193,7 +193,7 @@ impl TransactionContext {
         instruction_data: &[u8],
         record_instruction_in_transaction_context_push: bool,
     ) -> Result<(), InstructionError> {
-        let instruction_accounts_lamport_sum =
+        let callee_instruction_accounts_lamport_sum =
             self.instruction_accounts_lamport_sum(instruction_accounts)?;
         let index_in_trace = if self.instruction_stack.is_empty() {
             debug_assert!(
@@ -201,27 +201,42 @@ impl TransactionContext {
             );
             let instruction_context = InstructionContext {
                 nesting_level: self.instruction_stack.len(),
-                instruction_accounts_lamport_sum,
+                instruction_accounts_lamport_sum: callee_instruction_accounts_lamport_sum,
                 program_accounts: program_accounts.to_vec(),
                 instruction_accounts: instruction_accounts.to_vec(),
                 instruction_data: instruction_data.to_vec(),
             };
             self.instruction_trace.push(vec![instruction_context]);
             self.instruction_trace.len().saturating_sub(1)
-        } else if let Some(instruction_trace) = self.instruction_trace.last_mut() {
-            if record_instruction_in_transaction_context_push {
-                let instruction_context = InstructionContext {
-                    nesting_level: self.instruction_stack.len(),
-                    instruction_accounts_lamport_sum,
-                    program_accounts: program_accounts.to_vec(),
-                    instruction_accounts: instruction_accounts.to_vec(),
-                    instruction_data: instruction_data.to_vec(),
-                };
-                instruction_trace.push(instruction_context);
-            }
-            instruction_trace.len().saturating_sub(1)
         } else {
-            return Err(InstructionError::CallDepth);
+            let caller_instruction_context = self.get_current_instruction_context()?;
+            let caller_pre_instruction_accounts_lamport_sum =
+                caller_instruction_context.instruction_accounts_lamport_sum;
+            let caller_post_instruction_accounts_lamport_sum = self
+                .instruction_accounts_lamport_sum(
+                    &caller_instruction_context.instruction_accounts,
+                )?;
+            if caller_pre_instruction_accounts_lamport_sum
+                != caller_post_instruction_accounts_lamport_sum
+            {
+                return Err(InstructionError::UnbalancedInstruction);
+            }
+
+            if let Some(instruction_trace) = self.instruction_trace.last_mut() {
+                if record_instruction_in_transaction_context_push {
+                    let instruction_context = InstructionContext {
+                        nesting_level: self.instruction_stack.len(),
+                        instruction_accounts_lamport_sum: callee_instruction_accounts_lamport_sum,
+                        program_accounts: program_accounts.to_vec(),
+                        instruction_accounts: instruction_accounts.to_vec(),
+                        instruction_data: instruction_data.to_vec(),
+                    };
+                    instruction_trace.push(instruction_context);
+                }
+                instruction_trace.len().saturating_sub(1)
+            } else {
+                return Err(InstructionError::CallDepth);
+            }
         };
         if self.instruction_stack.len() >= self.instruction_context_capacity {
             return Err(InstructionError::CallDepth);
