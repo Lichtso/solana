@@ -366,6 +366,7 @@ mod tests {
             bpf_loader,
             entrypoint::deserialize,
             instruction::AccountMeta,
+            sysvar::rent::Rent,
         },
         std::{
             cell::RefCell,
@@ -468,8 +469,12 @@ mod tests {
             instruction_accounts,
             &program_indices,
         );
-        let mut transaction_context =
-            TransactionContext::new(preparation.transaction_accounts, 1, 1);
+        let mut transaction_context = TransactionContext::new(
+            preparation.transaction_accounts,
+            Some(Rent::default()),
+            1,
+            1,
+        );
         let mut invoke_context = InvokeContext::new_mock(&mut transaction_context, &[]);
         invoke_context
             .push(
