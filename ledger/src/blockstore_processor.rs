@@ -1840,7 +1840,7 @@ pub mod tests {
         matches::assert_matches,
         rand::{thread_rng, Rng},
         solana_entry::entry::{create_ticks, next_entry, next_entry_mut},
-        solana_program_runtime::{builtin_program::create_builtin, declare_process_instruction},
+        solana_program_runtime::{declare_process_instruction, loaded_programs::LoadedProgram},
         solana_runtime::{
             genesis_utils::{
                 self, create_genesis_config_with_vote_accounts, ValidatorVoteKeypairs,
@@ -3004,7 +3004,10 @@ pub mod tests {
         let mut bank = Bank::new_for_tests(&genesis_config);
         bank.add_builtin(
             mock_program_id,
-            create_builtin("mockup".to_string(), mock_processor_ok),
+            Arc::new(LoadedProgram::new_builtin(
+                "mockup".to_string(),
+                mock_processor_ok,
+            )),
         );
 
         let tx = Transaction::new_signed_with_payer(
@@ -3048,7 +3051,10 @@ pub mod tests {
             let mut bank = Bank::new_for_tests(&genesis_config);
             bank.add_builtin(
                 mock_program_id,
-                create_builtin("mockup".to_string(), mock_processor_err),
+                Arc::new(LoadedProgram::new_builtin(
+                    "mockup".to_string(),
+                    mock_processor_err,
+                )),
             );
 
             let tx = Transaction::new_signed_with_payer(

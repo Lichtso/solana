@@ -2,7 +2,6 @@ use {
     serde::{Deserialize, Serialize},
     solana_measure::measure::Measure,
     solana_program_runtime::{
-        builtin_program::BuiltinPrograms,
         compute_budget::ComputeBudget,
         invoke_context::InvokeContext,
         loaded_programs::LoadedProgramsForTxBatch,
@@ -52,7 +51,6 @@ impl MessageProcessor {
     /// The accounts are committed back to the bank only if every instruction succeeds.
     #[allow(clippy::too_many_arguments)]
     pub fn process_message(
-        builtin_programs: &BuiltinPrograms,
         message: &SanitizedMessage,
         program_indices: &[Vec<IndexOfAccount>],
         transaction_context: &mut TransactionContext,
@@ -73,7 +71,6 @@ impl MessageProcessor {
         let mut invoke_context = InvokeContext::new(
             transaction_context,
             rent,
-            builtin_programs,
             sysvar_cache,
             log_collector,
             compute_budget,
@@ -193,7 +190,7 @@ mod tests {
     use {
         super::*,
         crate::rent_collector::RentCollector,
-        solana_program_runtime::declare_process_instruction,
+        solana_program_runtime::{declare_process_instruction, loaded_programs::LoadedProgram},
         solana_sdk::{
             account::{AccountSharedData, ReadableAccount},
             instruction::{AccountMeta, Instruction, InstructionError},
@@ -254,10 +251,7 @@ mod tests {
         let writable_pubkey = Pubkey::new_unique();
         let readonly_pubkey = Pubkey::new_unique();
         let mock_system_program_id = Pubkey::new_unique();
-
         let rent_collector = RentCollector::default();
-        let builtin_programs =
-            BuiltinPrograms::new_mock(mock_system_program_id, process_instruction);
 
         let accounts = vec![
             (
@@ -278,6 +272,13 @@ mod tests {
         let program_indices = vec![vec![2]];
         let programs_loaded_for_tx_batch =
             Rc::new(RefCell::new(LoadedProgramsForTxBatch::default()));
+        programs_loaded_for_tx_batch.borrow_mut().replenish(
+            mock_system_program_id,
+            Arc::new(LoadedProgram::new_builtin(
+                "mockup".to_string(),
+                process_instruction,
+            )),
+        );
         let account_keys = (0..transaction_context.get_number_of_accounts())
             .map(|index| {
                 *transaction_context
@@ -307,7 +308,6 @@ mod tests {
             )));
         let sysvar_cache = SysvarCache::default();
         let result = MessageProcessor::process_message(
-            &builtin_programs,
             &message,
             &program_indices,
             &mut transaction_context,
@@ -359,7 +359,6 @@ mod tests {
                 ]),
             )));
         let result = MessageProcessor::process_message(
-            &builtin_programs,
             &message,
             &program_indices,
             &mut transaction_context,
@@ -401,7 +400,6 @@ mod tests {
                 ]),
             )));
         let result = MessageProcessor::process_message(
-            &builtin_programs,
             &message,
             &program_indices,
             &mut transaction_context,
@@ -485,11 +483,8 @@ mod tests {
                 Err(InstructionError::InvalidInstructionData)
             }
         });
-
         let mock_program_id = Pubkey::from([2u8; 32]);
         let rent_collector = RentCollector::default();
-        let builtin_programs = BuiltinPrograms::new_mock(mock_program_id, process_instruction);
-
         let accounts = vec![
             (
                 solana_sdk::pubkey::new_rand(),
@@ -509,6 +504,13 @@ mod tests {
         let program_indices = vec![vec![2]];
         let programs_loaded_for_tx_batch =
             Rc::new(RefCell::new(LoadedProgramsForTxBatch::default()));
+        programs_loaded_for_tx_batch.borrow_mut().replenish(
+            mock_program_id,
+            Arc::new(LoadedProgram::new_builtin(
+                "mockup".to_string(),
+                process_instruction,
+            )),
+        );
         let account_metas = vec![
             AccountMeta::new(
                 *transaction_context.get_key_of_account_at_index(0).unwrap(),
@@ -535,7 +537,6 @@ mod tests {
         )));
         let sysvar_cache = SysvarCache::default();
         let result = MessageProcessor::process_message(
-            &builtin_programs,
             &message,
             &program_indices,
             &mut transaction_context,
@@ -571,7 +572,6 @@ mod tests {
             Some(transaction_context.get_key_of_account_at_index(0).unwrap()),
         )));
         let result = MessageProcessor::process_message(
-            &builtin_programs,
             &message,
             &program_indices,
             &mut transaction_context,
@@ -604,7 +604,6 @@ mod tests {
             Some(transaction_context.get_key_of_account_at_index(0).unwrap()),
         )));
         let result = MessageProcessor::process_message(
-            &builtin_programs,
             &message,
             &program_indices,
             &mut transaction_context,
@@ -655,7 +654,15 @@ mod tests {
         declare_process_instruction!(process_instruction, 1, |_invoke_context| {
             Err(InstructionError::Custom(0xbabb1e))
         });
-        let builtin_programs = BuiltinPrograms::new_mock(mock_program_id, process_instruction);
+        let programs_loaded_for_tx_batch =
+            Rc::new(RefCell::new(LoadedProgramsForTxBatch::default()));
+        programs_loaded_for_tx_batch.borrow_mut().replenish(
+            mock_program_id,
+            Arc::new(LoadedProgram::new_builtin(
+                "mockup".to_string(),
+                process_instruction,
+            )),
+        );
 
         let mut secp256k1_account = AccountSharedData::new(1, 0, &native_loader::id());
         secp256k1_account.set_executable(true);
@@ -680,13 +687,12 @@ mod tests {
         )));
         let sysvar_cache = SysvarCache::default();
         let result = MessageProcessor::process_message(
-            &builtin_programs,
             &message,
             &[vec![0], vec![1]],
             &mut transaction_context,
             RentCollector::default().rent,
             None,
-            Rc::new(RefCell::new(LoadedProgramsForTxBatch::default())),
+            programs_loaded_for_tx_batch,
             Rc::new(RefCell::new(LoadedProgramsForTxBatch::default())),
             Rc::new(RefCell::new(LoadedProgramsForTxBatch::default())),
             Arc::new(FeatureSet::all_enabled()),

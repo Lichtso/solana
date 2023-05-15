@@ -12,10 +12,8 @@ use {
     solana_banks_server::banks_server::start_local_server,
     solana_bpf_loader_program::serialization::serialize_parameters,
     solana_program_runtime::{
-        builtin_program::{create_builtin, BuiltinPrograms, ProcessInstructionWithContext},
-        compute_budget::ComputeBudget,
-        ic_msg, stable_log,
-        timings::ExecuteTimings,
+        compute_budget::ComputeBudget, ic_msg, invoke_context::ProcessInstructionWithContext,
+        loaded_programs::LoadedProgram, stable_log, timings::ExecuteTimings,
     },
     solana_runtime::{
         accounts_background_service::{AbsRequestSender, SnapshotRequestType},
@@ -696,7 +694,7 @@ impl ProgramTest {
         info!("\"{}\" builtin program", program_name);
         self.builtin_programs.vec.push((
             program_id,
-            create_builtin(program_name.to_string(), process_instruction),
+            LoadedProgram::new_builtin(program_name.to_string(), process_instruction),
         ));
     }
 

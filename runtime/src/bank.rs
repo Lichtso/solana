@@ -93,7 +93,6 @@ use {
     solana_perf::perf_libs,
     solana_program_runtime::{
         accounts_data_meter::MAX_ACCOUNTS_DATA_LEN,
-        builtin_program::BuiltinPrograms,
         compute_budget::{self, ComputeBudget},
         loaded_programs::{
             LoadedProgram, LoadedProgramMatchCriteria, LoadedProgramType, LoadedPrograms,
@@ -774,7 +773,6 @@ impl PartialEq for Bank {
             epoch_stakes,
             is_delta,
             // TODO: Confirm if all these fields are intentionally ignored!
-            builtin_programs: _,
             runtime_config: _,
             builtin_feature_transitions: _,
             rewards: _,
@@ -992,9 +990,6 @@ pub struct Bank {
     /// A boolean reflecting whether any entries were recorded into the PoH
     /// stream for the slot == self.slot
     is_delta: AtomicBool,
-
-    /// The builtin programs
-    builtin_programs: BuiltinPrograms,
 
     /// Optional config parameters that can override runtime behavior
     runtime_config: Arc<RuntimeConfig>,
@@ -1255,7 +1250,6 @@ impl Bank {
             stakes_cache: StakesCache::default(),
             epoch_stakes: HashMap::<Epoch, EpochStakes>::default(),
             is_delta: AtomicBool::default(),
-            builtin_programs: BuiltinPrograms::default(),
             runtime_config: Arc::<RuntimeConfig>::default(),
             builtin_feature_transitions: Arc::<Vec<BuiltinFeatureTransition>>::default(),
             rewards: RwLock::<Vec<(Pubkey, RewardInfo)>>::default(),
@@ -1469,9 +1463,6 @@ impl Bank {
 
         let (epoch_stakes, epoch_stakes_time_us) = measure_us!(parent.epoch_stakes.clone());
 
-        let (builtin_programs, builtin_programs_time_us) =
-            measure_us!(parent.builtin_programs.clone());
-
         let (rewards_pool_pubkeys, rewards_pool_pubkeys_time_us) =
             measure_us!(parent.rewards_pool_pubkeys.clone());
 
@@ -1530,7 +1521,6 @@ impl Bank {
             is_delta: AtomicBool::new(false),
             tick_height: AtomicU64::new(parent.tick_height.load(Relaxed)),
             signature_count: AtomicU64::new(0),
-            builtin_programs,
             runtime_config: parent.runtime_config.clone(),
             builtin_feature_transitions: parent.builtin_feature_transitions.clone(),
             hard_forks: parent.hard_forks.clone(),
@@ -1614,7 +1604,7 @@ impl Bank {
                 blockhash_queue_time_us,
                 stakes_cache_time_us,
                 epoch_stakes_time_us,
-                builtin_programs_time_us,
+                builtin_programs_time_us: 0,
                 rewards_pool_pubkeys_time_us,
                 executor_cache_time_us: 0,
                 transaction_debug_keys_time_us,
@@ -1872,7 +1862,6 @@ impl Bank {
             stakes_cache: StakesCache::new(stakes),
             epoch_stakes: fields.epoch_stakes,
             is_delta: AtomicBool::new(fields.is_delta),
-            builtin_programs: new(),
             runtime_config,
             builtin_feature_transitions: new(),
             rewards: new(),
@@ -4248,7 +4237,6 @@ impl Bank {
             Rc::new(RefCell::new(LoadedProgramsForTxBatch::new(self.slot)));
         let mut process_message_time = Measure::start("process_message_time");
         let process_result = MessageProcessor::process_message(
-            &self.builtin_programs,
             tx.message(),
             &loaded_transaction.program_indices,
             &mut transaction_context,
@@ -4494,18 +4482,25 @@ impl Bank {
         check_time.stop();
 
         let program_owners: Vec<Pubkey> = vec![
+            native_loader::id(),
             bpf_loader_upgradeable::id(),
             bpf_loader::id(),
             bpf_loader_deprecated::id(),
         ];
         let program_owners_refs: Vec<&Pubkey> = program_owners.iter().collect();
-        let program_accounts_map = self.rc.accounts.filter_executable_program_accounts(
+        let mut program_accounts_map = self.rc.accounts.filter_executable_program_accounts(
             &self.ancestors,
             sanitized_txs,
             &mut check_results,
             &program_owners_refs,
             &self.blockhash_queue.read().unwrap(),
         );
+        // TODO: Find a better way to also load the BPF loader built-ins themselves
+        for program_owner in program_owners.iter().skip(1) {
+            if program_accounts_map.values().find(|owner| owner == &&program_owner).is_some() {
+                program_accounts_map.insert(*program_owner, &program_owners[0]);
+            }
+        }
 
         let programs_loaded_for_tx_batch = Rc::new(RefCell::new(
             self.replenish_program_cache(&program_accounts_map),
@@ -7289,18 +7284,10 @@ impl Bank {
         };
         debug!("Adding program {} under {:?}", name, program_id);
         self.add_builtin_account(name.as_str(), &program_id, false);
-        if let Some(entry) = self
-            .builtin_programs
-            .vec
-            .iter_mut()
-            .find(|entry| entry.0 == program_id)
-        {
-            entry.1 = builtin.clone();
-        } else {
-            self.builtin_programs
-                .vec
-                .push((program_id, builtin.clone()));
-        }
+        self.loaded_programs_cache
+            .write()
+            .unwrap()
+            .replenish(program_id, builtin.clone());
         debug!("Added program {} under {:?}", name, program_id);
     }
 
@@ -7737,11 +7724,6 @@ impl Bank {
                 .saturating_sub(forward_transactions_to_leader_at_slot_offset as usize),
             &mut error_counters,
         )
-    }
-
-    /// Return reference to builtin_progams
-    pub fn get_builtin_programs(&self) -> &BuiltinPrograms {
-        &self.builtin_programs
     }
 }
 

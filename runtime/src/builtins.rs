@@ -1,5 +1,5 @@
 use {
-    solana_program_runtime::{builtin_program::create_builtin, loaded_programs::LoadedProgram},
+    solana_program_runtime::loaded_programs::LoadedProgram,
     solana_sdk::{
         bpf_loader, bpf_loader_deprecated, bpf_loader_upgradeable, feature_set, pubkey::Pubkey,
     },
@@ -36,66 +36,66 @@ fn genesis_builtins() -> Vec<(Pubkey, Arc<LoadedProgram>)> {
     vec![
         (
             solana_system_program::id(),
-            create_builtin(
+            Arc::new(LoadedProgram::new_builtin(
                 "system_program".to_string(),
                 solana_system_program::system_processor::process_instruction,
-            ),
+            )),
         ),
         (
             solana_vote_program::id(),
-            create_builtin(
+            Arc::new(LoadedProgram::new_builtin(
                 "vote_program".to_string(),
                 solana_vote_program::vote_processor::process_instruction,
-            ),
+            )),
         ),
         (
             solana_stake_program::id(),
-            create_builtin(
+            Arc::new(LoadedProgram::new_builtin(
                 "stake_program".to_string(),
                 solana_stake_program::stake_instruction::process_instruction,
-            ),
+            )),
         ),
         (
             solana_config_program::id(),
-            create_builtin(
+            Arc::new(LoadedProgram::new_builtin(
                 "config_program".to_string(),
                 solana_config_program::config_processor::process_instruction,
-            ),
+            )),
         ),
         (
             bpf_loader_deprecated::id(),
-            create_builtin(
+            Arc::new(LoadedProgram::new_builtin(
                 "solana_bpf_loader_deprecated_program".to_string(),
                 solana_bpf_loader_program::process_instruction,
-            ),
+            )),
         ),
         (
             bpf_loader::id(),
-            create_builtin(
+            Arc::new(LoadedProgram::new_builtin(
                 "solana_bpf_loader_program".to_string(),
                 solana_bpf_loader_program::process_instruction,
-            ),
+            )),
         ),
         (
             bpf_loader_upgradeable::id(),
-            create_builtin(
+            Arc::new(LoadedProgram::new_builtin(
                 "solana_bpf_loader_upgradeable_program".to_string(),
                 solana_bpf_loader_program::process_instruction,
-            ),
+            )),
         ),
         (
             solana_sdk::compute_budget::id(),
-            create_builtin(
+            Arc::new(LoadedProgram::new_builtin(
                 "compute_budget_program".to_string(),
                 solana_compute_budget_program::process_instruction,
-            ),
+            )),
         ),
         (
             solana_address_lookup_table_program::id(),
-            create_builtin(
+            Arc::new(LoadedProgram::new_builtin(
                 "address_lookup_table_program".to_string(),
                 solana_address_lookup_table_program::processor::process_instruction,
-            ),
+            )),
         ),
     ]
 }
@@ -105,10 +105,10 @@ fn builtin_feature_transitions() -> Vec<BuiltinFeatureTransition> {
     vec![BuiltinFeatureTransition {
         feature_id: feature_set::zk_token_sdk_enabled::id(),
         program_id: solana_zk_token_sdk::zk_token_proof_program::id(),
-        builtin: create_builtin(
+        builtin: Arc::new(LoadedProgram::new_builtin(
             "zk_token_proof_program".to_string(),
             solana_zk_token_proof_program::process_instruction,
-        ),
+        )),
     }]
 }
 
@@ -117,4 +117,13 @@ pub(crate) fn get() -> Builtins {
         genesis_builtins: genesis_builtins(),
         feature_transitions: builtin_feature_transitions(),
     }
+}
+
+/// Returns the addresses of all builtin programs.
+pub fn get_pubkeys() -> Vec<Pubkey> {
+    let builtins = get();
+    let mut pubkeys = Vec::new();
+    pubkeys.extend(builtins.genesis_builtins.iter().map(|e| e.0));
+    pubkeys.extend(builtins.feature_transitions.iter().map(|e| e.program_id));
+    pubkeys
 }

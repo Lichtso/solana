@@ -1,7 +1,10 @@
 #[cfg(all(not(target_os = "windows"), target_arch = "x86_64"))]
 use solana_rbpf::error::EbpfError;
 use {
-    crate::{invoke_context::InvokeContext, timings::ExecuteDetailsTimings},
+    crate::{
+        invoke_context::{InvokeContext, ProcessInstructionWithContext},
+        timings::ExecuteDetailsTimings,
+    },
     itertools::Itertools,
     log::{debug, log_enabled, trace},
     percentage::PercentageInteger,
@@ -267,15 +270,16 @@ impl LoadedProgram {
     }
 
     /// Creates a new built-in program
-    pub fn new_builtin(
-        name: String,
-        deployment_slot: Slot,
-        program: BuiltInProgram<InvokeContext<'static>>,
-    ) -> Self {
+    pub fn new_builtin(name: String, process_instruction: ProcessInstructionWithContext) -> Self {
+        let deployment_slot = 0; // TODO: Use feature activation slot
+        let mut program = BuiltInProgram::default();
+        program
+            .register_function(b"entrypoint", process_instruction)
+            .unwrap();
         Self {
             deployment_slot,
-            account_size: 0,
-            effective_slot: deployment_slot.saturating_add(1),
+            account_size: name.len(),
+            effective_slot: deployment_slot,
             maybe_expiration_slot: None,
             usage_counter: AtomicU64::new(0),
             program: LoadedProgramType::Builtin(name, program),
@@ -318,7 +322,9 @@ impl LoadedProgram {
     }
 
     fn is_implicit_delay_visibility_tombstone(&self, slot: Slot) -> bool {
-        self.effective_slot.saturating_sub(self.deployment_slot) == DELAY_VISIBILITY_SLOT_OFFSET
+        !matches!(self.program, LoadedProgramType::Builtin(_, _))
+            && self.effective_slot.saturating_sub(self.deployment_slot)
+                == DELAY_VISIBILITY_SLOT_OFFSET
             && slot >= self.deployment_slot
             && slot < self.effective_slot
     }
