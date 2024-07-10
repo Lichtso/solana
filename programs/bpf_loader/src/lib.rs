@@ -1676,7 +1676,7 @@ mod tests {
     fn test_bpf_loader_invoke_main() {
         let loader_id = bpf_loader::id();
         let program_id = Pubkey::new_unique();
-        let mut program_account =
+        let program_account =
             load_program_account_from_elf(&loader_id, "test_elfs/out/noop_aligned.so");
         let parameter_id = Pubkey::new_unique();
         let parameter_account = AccountSharedData::new(1, 0, &loader_id);
@@ -1726,7 +1726,7 @@ mod tests {
             &[],
             vec![
                 (program_id, program_account.clone()),
-                (parameter_id, parameter_account),
+                (parameter_id, parameter_account.clone()),
             ],
             vec![parameter_meta.clone(), parameter_meta],
             Ok(()),
@@ -1737,7 +1737,7 @@ mod tests {
             &loader_id,
             vec![0],
             &[],
-            vec![(program_id, program_account.clone())],
+            vec![(program_id, program_account)],
             Vec::new(),
             Err(InstructionError::ProgramFailedToComplete),
             Entrypoint::vm,
@@ -1749,14 +1749,29 @@ mod tests {
         );
 
         // Case: Account not a program
-        program_account.set_executable(false);
+        mock_process_instruction(
+            &loader_id,
+            vec![0],
+            &[],
+            vec![(program_id, parameter_account.clone())],
+            Vec::new(),
+            Err(InstructionError::IncorrectProgramId),
+            Entrypoint::vm,
+            |invoke_context| {
+                let mut feature_set = invoke_context.get_feature_set().clone();
+                feature_set.deactivate(&remove_accounts_executable_flag_checks::id());
+                invoke_context.mock_set_feature_set(Arc::new(feature_set));
+                test_utils::load_all_invoked_programs(invoke_context);
+            },
+            |_invoke_context| {},
+        );
         process_instruction(
             &loader_id,
             &[0],
             &[],
-            vec![(program_id, program_account)],
+            vec![(program_id, parameter_account)],
             Vec::new(),
-            Err(InstructionError::IncorrectProgramId),
+            Err(InstructionError::UnsupportedProgramId),
         );
     }
 
@@ -2419,22 +2434,35 @@ mod tests {
         );
 
         // Case: Program account not executable
-        let (mut transaction_accounts, instruction_accounts) = get_accounts(
+        let (transaction_accounts, mut instruction_accounts) = get_accounts(
             &buffer_address,
             &upgrade_authority_address,
             &upgrade_authority_address,
             &elf_orig,
             &elf_new,
         );
-        transaction_accounts
-            .get_mut(1)
-            .unwrap()
-            .1
-            .set_executable(false);
-        process_instruction(
-            transaction_accounts,
-            instruction_accounts,
+        *instruction_accounts.get_mut(1).unwrap() = instruction_accounts.get(2).unwrap().clone();
+        let instruction_data = bincode::serialize(&UpgradeableLoaderInstruction::Upgrade).unwrap();
+        mock_process_instruction(
+            &bpf_loader_upgradeable::id(),
+            Vec::new(),
+            &instruction_data,
+            transaction_accounts.clone(),
+            instruction_accounts.clone(),
             Err(InstructionError::AccountNotExecutable),
+            Entrypoint::vm,
+            |invoke_context| {
+                let mut feature_set = invoke_context.get_feature_set().clone();
+                feature_set.deactivate(&remove_accounts_executable_flag_checks::id());
+                invoke_context.mock_set_feature_set(Arc::new(feature_set));
+                test_utils::load_all_invoked_programs(invoke_context);
+            },
+            |_invoke_context| {},
+        );
+        process_instruction(
+            transaction_accounts.clone(),
+            instruction_accounts.clone(),
+            Err(InstructionError::InvalidAccountData),
         );
 
         // Case: Program account now owned by loader
@@ -3633,7 +3661,7 @@ mod tests {
                 (program_address, program_account.clone()),
             ],
             Vec::new(),
-            Err(InstructionError::InvalidAccountData),
+            Err(InstructionError::UnsupportedProgramId),
         );
 
         // Case: Reopen should fail
