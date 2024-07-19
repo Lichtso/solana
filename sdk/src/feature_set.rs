@@ -845,6 +845,10 @@ pub mod remove_accounts_executable_flag_checks {
     solana_sdk::declare_id!("FfgtauHUWKeXTzjXkua9Px4tNGBFHKZ9WaigM5VbbzFx");
 }
 
+pub mod lift_cpi_caller_restriction {
+    solana_sdk::declare_id!("HcW8ZjBezYYgvcbxNJwqv1t484Y2556qJsfNDWvJGZRH");
+}
+
 lazy_static! {
     /// Map of feature identifiers to user-visible description
     pub static ref FEATURE_NAMES: HashMap<Pubkey, &'static str> = [
@@ -1051,6 +1055,7 @@ lazy_static! {
         (ed25519_precompile_verify_strict::id(), "Use strict verification in ed25519 precompile SIMD-0152"),
         (vote_only_retransmitter_signed_fec_sets::id(), "vote only on retransmitter signed fec sets"),
         (remove_accounts_executable_flag_checks::id(), "Remove checks of accounts is_executable flag #2182"),
+        (lift_cpi_caller_restriction::id(), "Lift the restriction in CPI that the caller must have the callee as an instruction account #2202")
         /*************** ADD NEW FEATURES HERE ***************/
     ]
     .iter()
