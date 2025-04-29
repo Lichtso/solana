@@ -1176,6 +1176,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         };
 
         let mut post_account_state_info_result = process_result
+            .clone()
             .and_then(|_info| {
                 let post_account_state_info = TransactionAccountStateInfo::new_post_exec(
                     &transaction_context,
@@ -1229,6 +1230,164 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         // changed_account_count reflects every account that will be written back,
         // including the fee payer marked above.
         let touched_account_count = touched_flags.iter().filter(|touched| **touched).count();
+
+        if let Some((
+            second_replay_execution_record,
+            second_replay_log_messages,
+            second_replay_process_result,
+        )) = second_replay_result
+        {
+            let empty = Vec::new();
+            let logs = log_messages.as_ref().unwrap_or(&empty);
+            let second_replay_logs = second_replay_log_messages.as_ref().unwrap_or(&empty);
+            let divergent_accounts: Vec<_> =
+                if process_result.is_ok() && second_replay_process_result.is_ok() {
+                    accounts
+                        .iter()
+                        .zip(second_replay_execution_record.accounts.iter())
+                        .enumerate()
+                        .filter_map(|(index, ((key, first_replay), (_, second_replay)))| {
+                            (tx.is_writable(index) && second_replay != first_replay).then_some((
+                                index,
+                                key,
+                                first_replay,
+                                second_replay,
+                            ))
+                        })
+                        .collect()
+                } else {
+                    Vec::default()
+                };
+            if process_result != second_replay_process_result
+                || logs != second_replay_logs
+                || !divergent_accounts.is_empty()
+            {
+                let first_difference = logs
+                    .iter()
+                    .zip(second_replay_logs.iter())
+                    .position(|(a, b)| a != b)
+                    .unwrap_or(logs.len().min(second_replay_logs.len()));
+                let cause = second_replay_logs
+                    .get(first_difference)
+                    .and_then(|string| string.split(" ").skip(1).next())
+                    .map_or("Unknown", |string| string);
+                use std::io::prelude::*;
+                let file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/home/sol/logs/divergent_transactions.log")
+                    .unwrap();
+                let mut buffer = std::io::BufWriter::new(file);
+                writeln!(
+                    buffer,
+                    "{}",
+                    sysvar_cache.get_clock().unwrap().unix_timestamp
+                )
+                .unwrap();
+                writeln!(buffer, "    slot: {}", program_cache_for_tx_batch.slot()).unwrap();
+                writeln!(buffer, "    signature: {}", tx.signature()).unwrap();
+                writeln!(
+                    buffer,
+                    "    cause: {} {:?} {:?}",
+                    cause, process_result, second_replay_process_result,
+                )
+                .unwrap();
+                if process_result != second_replay_process_result {
+                    writeln!(buffer, "    result: {:?}", process_result).unwrap();
+                    writeln!(
+                        buffer,
+                        "    divergent_result: {:?}",
+                        second_replay_process_result
+                    )
+                    .unwrap();
+                }
+                if logs != second_replay_logs {
+                    writeln!(buffer, "    logs: {:?}", logs).unwrap();
+                    writeln!(buffer, "    divergent_logs: {:?}", second_replay_logs).unwrap();
+                }
+                for (index, key, first_replay, second_replay) in divergent_accounts.into_iter() {
+                    writeln!(buffer, "    divergent_account: {}", index).unwrap();
+                    writeln!(buffer, "        key: {:?}", key).unwrap();
+                    if first_replay.owner() != second_replay.owner() {
+                        writeln!(buffer, "        owner: {:?}", first_replay.owner()).unwrap();
+                        writeln!(
+                            buffer,
+                            "        divergent_owner: {:?}",
+                            second_replay.owner()
+                        )
+                        .unwrap();
+                    }
+                    if first_replay.lamports() != second_replay.lamports() {
+                        writeln!(buffer, "        lamports: {}", first_replay.lamports()).unwrap();
+                        writeln!(
+                            buffer,
+                            "        divergent_lamports: {}",
+                            second_replay.lamports()
+                        )
+                        .unwrap();
+                    }
+                    if first_replay.rent_epoch() != second_replay.rent_epoch() {
+                        writeln!(buffer, "        rent_epoch: {}", first_replay.rent_epoch())
+                            .unwrap();
+                        writeln!(
+                            buffer,
+                            "        divergent_rent_epoch: {}",
+                            second_replay.rent_epoch()
+                        )
+                        .unwrap();
+                    }
+                    if first_replay.executable() != second_replay.executable() {
+                        writeln!(
+                            buffer,
+                            "        executable_flag: {}",
+                            first_replay.executable()
+                        )
+                        .unwrap();
+                        writeln!(
+                            buffer,
+                            "        divergent_executable_flag: {}",
+                            second_replay.executable()
+                        )
+                        .unwrap();
+                    }
+                    if first_replay.data().len() != second_replay.data().len() {
+                        writeln!(buffer, "        data_len: {}", first_replay.data().len())
+                            .unwrap();
+                        writeln!(
+                            buffer,
+                            "        divergent_data_len: {}",
+                            second_replay.data().len()
+                        )
+                        .unwrap();
+                    }
+                    if first_replay.data() != second_replay.data() {
+                        writeln!(
+                            buffer,
+                            "        data_len: {} {}",
+                            first_replay.data().len(),
+                            second_replay.data().len(),
+                        )
+                        .unwrap();
+                        for (offset, (first_replay, second_replay)) in first_replay
+                            .data()
+                            .iter()
+                            .zip(second_replay.data().iter())
+                            .enumerate()
+                            .filter(|(_offset, (first_replay, second_replay))| {
+                                first_replay != second_replay
+                            })
+                        {
+                            writeln!(
+                                buffer,
+                                "        divergent_data: [{}] {:02X} != {:02X}",
+                                offset, first_replay, second_replay,
+                            )
+                            .unwrap();
+                        }
+                    }
+                }
+            }
+        }
 
         if post_account_state_info_result.is_ok()
             && transaction_accounts_lamports_sum(&accounts)
