@@ -997,6 +997,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         execute_timings.execute_accessories.process_message_us += process_message_time.as_us();
 
         let mut status = process_result
+            .clone()
             .and_then(|info| {
                 let post_account_state_info =
                     TransactionAccountStateInfo::new(&transaction_context, tx, &environment.rent);
@@ -1099,6 +1100,157 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
             touched_account_count,
             accounts_resize_delta: accounts_data_len_delta,
         } = execution_record;
+
+        if let Some((
+            second_replay_execution_record,
+            second_replay_logs,
+            second_replay_process_result,
+        )) = second_replay_result
+        {
+            let empty = Vec::new();
+            let logs = log_messages.as_ref().unwrap_or(&empty);
+            let divergent_accounts: Vec<_> =
+                if process_result.is_ok() && second_replay_process_result.is_ok() {
+                    accounts
+                        .iter()
+                        .zip(second_replay_execution_record.accounts.iter())
+                        .enumerate()
+                        .filter_map(|(index, ((key, first_replay), (_, second_replay)))| {
+                            (tx.is_writable(index) && second_replay != first_replay).then_some((
+                                index,
+                                key,
+                                first_replay,
+                                second_replay,
+                            ))
+                        })
+                        .collect()
+                } else {
+                    Vec::default()
+                };
+            if process_result != second_replay_process_result
+                || *logs != second_replay_logs
+                || !divergent_accounts.is_empty()
+            {
+                use std::io::prelude::*;
+                let file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/home/sol/logs/divergent_transactions.log")
+                    .unwrap();
+                let mut buffer = std::io::BufWriter::new(file);
+                writeln!(
+                    buffer,
+                    "{}",
+                    sysvar_cache.get_clock().unwrap().unix_timestamp
+                )
+                .unwrap();
+                writeln!(buffer, "    slot: {}", program_cache_for_tx_batch.slot()).unwrap();
+                writeln!(buffer, "    signature: {}", tx.signature()).unwrap();
+                writeln!(
+                    buffer,
+                    "    cause: {}",
+                    second_replay_logs
+                        .last()
+                        .cloned()
+                        .unwrap_or_else(|| "unknown".to_string()),
+                )
+                .unwrap();
+                writeln!(buffer, "    result: {:?}", process_result).unwrap();
+                if process_result != second_replay_process_result {
+                    writeln!(
+                        buffer,
+                        "    divergent_result: {:?}",
+                        second_replay_process_result
+                    )
+                    .unwrap();
+                }
+                writeln!(buffer, "    logs: {:?}", logs).unwrap();
+                if *logs != second_replay_logs {
+                    writeln!(buffer, "    divergent_logs: {:?}", second_replay_logs).unwrap();
+                }
+                for (index, key, first_replay, second_replay) in divergent_accounts.into_iter() {
+                    writeln!(buffer, "    divergent_account: {}", index).unwrap();
+                    writeln!(buffer, "        key: {:?}", key).unwrap();
+                    if first_replay.owner() != second_replay.owner() {
+                        writeln!(buffer, "        owner: {:?}", first_replay.owner()).unwrap();
+                        writeln!(
+                            buffer,
+                            "        divergent_owner: {:?}",
+                            second_replay.owner()
+                        )
+                        .unwrap();
+                    }
+                    if first_replay.lamports() != second_replay.lamports() {
+                        writeln!(buffer, "        lamports: {}", first_replay.lamports()).unwrap();
+                        writeln!(
+                            buffer,
+                            "        divergent_lamports: {}",
+                            second_replay.lamports()
+                        )
+                        .unwrap();
+                    }
+                    if first_replay.rent_epoch() != second_replay.rent_epoch() {
+                        writeln!(buffer, "        rent_epoch: {}", first_replay.rent_epoch())
+                            .unwrap();
+                        writeln!(
+                            buffer,
+                            "        divergent_rent_epoch: {}",
+                            second_replay.rent_epoch()
+                        )
+                        .unwrap();
+                    }
+                    if first_replay.executable() != second_replay.executable() {
+                        writeln!(
+                            buffer,
+                            "        executable_flag: {}",
+                            first_replay.executable()
+                        )
+                        .unwrap();
+                        writeln!(
+                            buffer,
+                            "        divergent_executable_flag: {}",
+                            second_replay.executable()
+                        )
+                        .unwrap();
+                    }
+                    if first_replay.data().len() != second_replay.data().len() {
+                        writeln!(buffer, "        data_len: {}", first_replay.data().len())
+                            .unwrap();
+                        writeln!(
+                            buffer,
+                            "        divergent_data_len: {}",
+                            second_replay.data().len()
+                        )
+                        .unwrap();
+                    }
+                    if first_replay.data() != second_replay.data() {
+                        writeln!(
+                            buffer,
+                            "        data_len: {} {}",
+                            first_replay.data().len(),
+                            second_replay.data().len(),
+                        )
+                        .unwrap();
+                        for (offset, (first_replay, second_replay)) in first_replay
+                            .data()
+                            .iter()
+                            .zip(second_replay.data().iter())
+                            .enumerate()
+                            .filter(|(_offset, (first_replay, second_replay))| {
+                                first_replay != second_replay
+                            })
+                        {
+                            writeln!(
+                                buffer,
+                                "        divergent_data: [{}] {:02X} != {:02X}",
+                                offset, first_replay, second_replay,
+                            )
+                            .unwrap();
+                        }
+                    }
+                }
+            }
+        }
 
         if status.is_ok()
             && transaction_accounts_lamports_sum(&accounts)
