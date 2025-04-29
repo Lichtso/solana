@@ -1036,7 +1036,8 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         environment: &TransactionProcessingEnvironment,
         config: &TransactionProcessingConfig,
     ) -> ExecutedTransaction {
-        let transaction_accounts = std::mem::take(&mut loaded_transaction.accounts);
+        let mut transaction_accounts = std::mem::take(&mut loaded_transaction.accounts);
+        let compute_budget = loaded_transaction.compute_budget;
 
         // Ensure the length of accounts matches the expected length from tx.account_keys().
         // This is a sanity check in case that someone starts adding some additional accounts
@@ -1053,8 +1054,11 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
 
         let lamports_before_tx =
             transaction_accounts_lamports_sum(&transaction_accounts).unwrap_or(0);
-
-        let compute_budget = loaded_transaction.compute_budget;
+        let transaction_accounts_before_tx = transaction_accounts
+            .iter()
+            .map(|(key, acc)| (key.clone(), acc.clone()))
+            .collect::<Vec<_>>();
+        let program_cache_for_tx_batch_before_tx = program_cache_for_tx_batch.clone();
 
         let mut transaction_context = TransactionContext::new(
             transaction_accounts,
@@ -1073,7 +1077,9 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
             relax_post_exec_min_balance_check,
         );
 
-        let log_collector = if config.recording_config.enable_log_recording {
+        let enable_second_replay = true;
+        let log_collector = if config.recording_config.enable_log_recording || enable_second_replay
+        {
             match config.log_messages_bytes_limit {
                 None => Some(LogCollector::new_ref()),
                 Some(log_messages_bytes_limit) => Some(LogCollector::new_ref_with_limit(Some(
@@ -1112,6 +1118,65 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         drop(invoke_context);
 
         execute_timings.execute_accessories.process_message_us += process_message_time.as_us();
+
+        let second_replay_result = if enable_second_replay {
+            transaction_accounts = transaction_accounts_before_tx
+                .iter()
+                .map(|(key, acc)| (key.clone(), acc.clone()))
+                .collect::<Vec<_>>();
+            let mut transaction_context = TransactionContext::new(
+                transaction_accounts,
+                environment.rent.clone(),
+                compute_budget.max_instruction_stack_depth,
+                compute_budget.max_instruction_trace_length,
+                tx.num_instructions(),
+            );
+
+            let log_collector = match config.log_messages_bytes_limit {
+                None => Some(LogCollector::new_ref()),
+                Some(log_messages_bytes_limit) => Some(LogCollector::new_ref_with_limit(Some(
+                    log_messages_bytes_limit,
+                ))),
+            };
+
+            let mut feature_set = environment.feature_set;
+
+            *program_cache_for_tx_batch = program_cache_for_tx_batch_before_tx.clone();
+            let sysvar_cache = &self.sysvar_cache.read().unwrap();
+            let mut invoke_context = InvokeContext::new(
+                &mut transaction_context,
+                program_cache_for_tx_batch,
+                EnvironmentConfig::new(
+                    environment.blockhash,
+                    environment.blockhash_lamports_per_signature,
+                    environment.alpenglow_migration_succeeded,
+                    callback,
+                    &feature_set,
+                    &environment.program_runtime_environments,
+                    sysvar_cache,
+                ),
+                log_collector.clone(),
+                compute_budget,
+                self.execution_cost,
+            );
+
+            let mut execute_timings = execute_timings.clone();
+            let mut executed_units = 0u64;
+            let process_result = invoke_context
+                .process_message(tx, &mut execute_timings, &mut executed_units)
+                .map_err(|(index, err)| TransactionError::InstructionError(index, err));
+
+            let log_collector = invoke_context.get_log_collector().unwrap();
+            let logs = log_collector.borrow().messages.to_owned();
+            drop(invoke_context);
+
+            let (execution_record, _inner_instructions) =
+                Self::deconstruct_transaction(transaction_context, false);
+
+            Some((execution_record, logs, process_result))
+        } else {
+            None
+        };
 
         let mut post_account_state_info_result = process_result
             .and_then(|_info| {
