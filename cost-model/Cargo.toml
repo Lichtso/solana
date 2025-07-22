@@ -34,7 +34,7 @@ name = "solana_cost_model"
 
 [dev-dependencies]
 itertools = { workspace = true }
-rand = "0.8.5"
+rand = "0.9.2"
 solana-logger = { workspace = true }
 solana-sdk = { workspace = true, features = ["dev-context-only-utils"] }
 solana-system-program = { workspace = true }
