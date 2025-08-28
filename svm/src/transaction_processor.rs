@@ -1040,6 +1040,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
             };
 
             let mut feature_set = environment.feature_set;
+            feature_set.stricter_abi_and_runtime_constraints = true;
 
             let sysvar_cache = &self.sysvar_cache.read().unwrap();
             let mut invoke_context = InvokeContext::new(

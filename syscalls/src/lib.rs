@@ -330,7 +330,7 @@ pub fn create_program_runtime_environment_v1<'a, 'ix_data>(
         sanitize_user_provided_values: true,
         enabled_sbpf_versions: min_sbpf_version..=max_sbpf_version,
         optimize_rodata: false,
-        aligned_memory_mapping: !feature_set.stricter_abi_and_runtime_constraints,
+        aligned_memory_mapping: false,
         // Warning, do not use `Config::default()` so that configuration here is explicit.
     };
     let mut result = BuiltinProgram::new_loader(config);
