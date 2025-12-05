@@ -245,7 +245,7 @@ impl<FG: ForkGraph> Default for TransactionBatchProcessor<FG> {
             epoch: Epoch::default(),
             sysvar_cache: RwLock::<SysvarCache>::default(),
             epoch_boundary_preparation: Arc::new(RwLock::new(EpochBoundaryPreparation::default())),
-            global_program_cache: Arc::new(RwLock::new(ProgramCache::new(Slot::default()))),
+            global_program_cache: Arc::new(RwLock::new(ProgramCache::new(Slot::default(), false))),
             program_runtime_environment: ProgramRuntimeEnvironment::from(
                 BuiltinProgram::new_loader(VmConfig::default()),
             ),
@@ -273,7 +273,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
             slot,
             epoch,
             epoch_boundary_preparation,
-            global_program_cache: Arc::new(RwLock::new(ProgramCache::new(slot))),
+            global_program_cache: Arc::new(RwLock::new(ProgramCache::new(slot, false))),
             builtin_program_cache: RwLock::new(ProgramCacheForTxBatch::new(slot)),
             ..Self::default()
         }
@@ -412,6 +412,10 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                 // Use the prediction if equal but not identical
                 self.program_runtime_environment = upcoming_environment;
             }
+            self.global_program_cache
+                .write()
+                .unwrap()
+                .forward_builtins_to_new_environment(&self.program_runtime_environment);
         }
     }
 

@@ -17,7 +17,7 @@ use {
         thread,
     },
     std::{
-        collections::{HashMap, hash_map::Entry},
+        collections::{HashMap, HashSet, hash_map::Entry},
         sync::Weak,
     },
 };
@@ -230,6 +230,12 @@ pub(crate) enum IndexImplementation {
         /// so all loads for a given program key are serialized.
         loading_entries: Mutex<HashMap<Pubkey, (Slot, thread::ThreadId)>>,
     },
+    /// Using fork-graph of accounts-db
+    V2 {
+        entries: HashMap<(Pubkey, Slot, ProgramRuntimeEnvironment), Arc<ProgramCacheEntry>>,
+        loading_entries:
+            Mutex<HashMap<(Pubkey, Slot, ProgramRuntimeEnvironment), thread::ThreadId>>,
+    },
 }
 
 /// This structure is the global cache of loaded, verified and compiled programs.
@@ -369,11 +375,18 @@ impl ProgramCacheForTxBatch {
 }
 
 impl<FG: ForkGraph> ProgramCache<FG> {
-    pub fn new(root_slot: Slot) -> Self {
+    pub fn new(root_slot: Slot, new_index_structure: bool) -> Self {
         Self {
-            index: IndexImplementation::V1 {
-                entries: HashMap::new(),
-                loading_entries: Mutex::new(HashMap::new()),
+            index: if new_index_structure {
+                IndexImplementation::V2 {
+                    entries: HashMap::new(),
+                    loading_entries: Mutex::new(HashMap::new()),
+                }
+            } else {
+                IndexImplementation::V1 {
+                    entries: HashMap::new(),
+                    loading_entries: Mutex::new(HashMap::new()),
+                }
             },
             latest_root_slot: root_slot,
             stats: ProgramCacheStats::default(),
@@ -482,8 +495,81 @@ impl<FG: ForkGraph> ProgramCache<FG> {
                         || Arc::ptr_eq(existing, &entry)
                 });
             }
+            IndexImplementation::V2 { entries, .. } => {
+                match entries.entry((
+                    key,
+                    entry.deployment_slot,
+                    program_runtime_environment.clone(),
+                )) {
+                    Entry::Occupied(mut existing) => {
+                        match (&existing.get().program, &entry.program) {
+                            (
+                                ProgramCacheEntryType::Builtin(_),
+                                ProgramCacheEntryType::Builtin(_),
+                            )
+                            | (ProgramCacheEntryType::Closed, ProgramCacheEntryType::Unloaded(_))
+                            | (
+                                ProgramCacheEntryType::Unloaded(_),
+                                ProgramCacheEntryType::Loaded(_),
+                            )
+                            | (
+                                ProgramCacheEntryType::Unloaded(_),
+                                ProgramCacheEntryType::FailedVerification(_),
+                            ) => {
+                                // Copy over the usage counter to the new entry
+                                entry.stats.merge_from(&existing.get().stats);
+                                self.stats.reloads.fetch_add(1, Ordering::Relaxed);
+                                existing.insert(Arc::clone(&entry));
+                            }
+                            _ => {
+                                // Something is wrong, I can feel it ...
+                                error!(
+                                    "ProgramCache::assign_program() failed key={key:?} \
+                                    existing={existing:?} entry={entry:?}"
+                                );
+                                debug_assert!(false, "Unexpected replacement of an entry");
+                                self.stats.replacements.fetch_add(1, Ordering::Relaxed);
+                                return true;
+                            }
+                        }
+                    }
+                    Entry::Vacant(empty) => {
+                        self.stats.insertions.fetch_add(1, Ordering::Relaxed);
+                        empty.insert(Arc::clone(&entry));
+                    }
+                }
+            }
         }
         false
+    }
+
+    /// Reinserts the built-ins when the environment changes (on every fork which crosses the epoch boundary)
+    pub fn forward_builtins_to_new_environment(
+        &mut self,
+        new_environment: &ProgramRuntimeEnvironment,
+    ) {
+        match &mut self.index {
+            IndexImplementation::V1 { .. } => {}
+            IndexImplementation::V2 { entries, .. } => {
+                let mut to_forward: HashMap<Pubkey, (Slot, Arc<ProgramCacheEntry>)> =
+                    HashMap::new();
+                for ((id, deployment_slot, _program_runtime_environment), entry) in entries.iter() {
+                    if matches!(entry.program, ProgramCacheEntryType::Builtin(_)) {
+                        to_forward.insert(*id, (*deployment_slot, Arc::clone(entry)));
+                    }
+                }
+                for (id, (deployment_slot, entry)) in to_forward.into_iter() {
+                    entries.insert(
+                        (
+                            id,
+                            deployment_slot,
+                            ProgramRuntimeEnvironment::clone(&new_environment),
+                        ),
+                        entry,
+                    );
+                }
+            }
+        }
     }
 
     pub fn prune_by_deployment_slot(&mut self, slot: Slot) {
@@ -493,6 +579,13 @@ impl<FG: ForkGraph> ProgramCache<FG> {
                     second_level.retain(|entry| entry.deployment_slot != slot);
                 }
                 self.remove_programs_with_no_entries();
+            }
+            IndexImplementation::V2 { entries, .. } => {
+                entries.retain(
+                    |(_id, _deployment_slot, _program_runtime_environment), entry| {
+                        entry.deployment_slot != slot
+                    },
+                );
             }
         }
     }
@@ -562,9 +655,70 @@ impl<FG: ForkGraph> ProgramCache<FG> {
                         .collect();
                     second_level.reverse();
                 }
+                self.remove_programs_with_no_entries();
+            }
+            IndexImplementation::V2 { entries, .. } => {
+                // First, collect the latest slot per key for all entries
+                // deployed on the fork of new_root_slot.
+                let mut latest_slot_per_key: HashMap<Pubkey, Slot> = HashMap::new();
+                for ((id, deployment_slot, _program_runtime_environment), entry) in entries.iter() {
+                    if entry.deployment_slot <= self.latest_root_slot
+                        || (entry.deployment_slot < new_root_slot
+                            && matches!(
+                                fork_graph.relationship(entry.deployment_slot, new_root_slot),
+                                BlockRelation::Ancestor
+                            ))
+                    {
+                        latest_slot_per_key
+                            .entry(*id)
+                            .and_modify(|slot| *slot = (*slot).max(*deployment_slot))
+                            .or_insert(*deployment_slot);
+                    }
+                }
+                // Then delete everything which is not the newest deployment
+                // on the fork of `new_root_slot` or newer forks thereof.
+                entries.retain(
+                    |(id, deployment_slot, program_runtime_environment), entry| {
+                        // Clean up tombstones and unloaded entries
+                        match entry.program {
+                            ProgramCacheEntryType::Builtin(_)
+                            | ProgramCacheEntryType::Loaded(_) => {}
+                            _ => {
+                                if entry.deployment_slot <= self.latest_root_slot
+                                // && entry.latest_access_slot.load(Relaxed) < tombstone_slot_cutoff
+                                {
+                                    return false;
+                                }
+                            }
+                        }
+                        let mut keep = if entry.deployment_slot < new_root_slot {
+                            latest_slot_per_key
+                                .get(id)
+                                .map(|slot| *deployment_slot == *slot)
+                                .unwrap_or(false)
+                        } else {
+                            matches!(
+                                fork_graph.relationship(entry.deployment_slot, new_root_slot),
+                                BlockRelation::Equal | BlockRelation::Descendant
+                            )
+                        };
+                        if !keep {
+                            self.stats.prunes_orphan.fetch_add(1, Ordering::Relaxed);
+                        }
+                        // Remove outdated environment of previous feature set
+                        if let Some(new_environment) = new_environment.as_ref()
+                            && program_runtime_environment != new_environment
+                        {
+                            self.stats
+                                .prunes_environment
+                                .fetch_add(1, Ordering::Relaxed);
+                            keep = false;
+                        }
+                        keep
+                    },
+                );
             }
         }
-        self.remove_programs_with_no_entries();
         debug_assert!(self.latest_root_slot <= new_root_slot);
         self.latest_root_slot = new_root_slot;
     }
@@ -691,6 +845,61 @@ impl<FG: ForkGraph> ProgramCache<FG> {
                     true
                 });
             }
+            IndexImplementation::V2 {
+                entries,
+                loading_entries,
+            } => {
+                search_for.retain(|program_to_load| {
+                    if let Some(entry) = entries.get(&(
+                        *program_to_load.program_id,
+                        program_to_load.deployment_slot,
+                        program_runtime_environment_for_execution.clone(),
+                    )) {
+                        match &entry.program {
+                            ProgramCacheEntryType::Unloaded(_environment) => {}
+                            _ => {
+                                let entry_to_return = if entry
+                                    .is_implicit_delay_visibility_tombstone(
+                                        loaded_programs_for_tx_batch.slot,
+                                    ) {
+                                    // Found a program entry on the current fork, but it's not effective
+                                    // yet. It indicates that the program has delayed visibility. Return
+                                    // the tombstone to reflect that.
+                                    Arc::new(ProgramCacheEntry::new_delay_visibility_tombstone(
+                                        entry.deployment_slot,
+                                        entry.account_owner,
+                                        Arc::clone(&entry.stats),
+                                    ))
+                                } else {
+                                    entry.clone()
+                                };
+                                entry_to_return
+                                    .update_access_slot(loaded_programs_for_tx_batch.slot);
+                                if increment_usage_counter {
+                                    entry_to_return.stats.uses.fetch_add(1, Ordering::Relaxed);
+                                }
+                                loaded_programs_for_tx_batch
+                                    .entries
+                                    .insert(*program_to_load.program_id, entry_to_return);
+                                return false;
+                            }
+                        }
+                    }
+                    if cooperative_loading_task.is_none() {
+                        let mut loading_entries = loading_entries.lock().unwrap();
+                        let entry = loading_entries.entry((
+                            *program_to_load.program_id,
+                            program_to_load.deployment_slot,
+                            program_runtime_environment_for_execution.clone(),
+                        ));
+                        if let Entry::Vacant(entry) = entry {
+                            entry.insert(thread::current().id());
+                            cooperative_loading_task = Some(*program_to_load.program_id);
+                        }
+                    }
+                    true
+                })
+            }
         }
         drop(locked_fork_graph);
         if count_hits_and_misses {
@@ -711,7 +920,7 @@ impl<FG: ForkGraph> ProgramCache<FG> {
         program_runtime_environment: &ProgramRuntimeEnvironment,
         current_slot: Slot,
         key: Pubkey,
-        last_modification_slot: Slot,
+        _last_modification_slot: Slot,
         loaded_program: Arc<ProgramCacheEntry>,
     ) -> bool {
         match &mut self.index {
@@ -736,16 +945,26 @@ impl<FG: ForkGraph> ProgramCache<FG> {
                 {
                     self.stats.lost_insertions.fetch_add(1, Ordering::Relaxed);
                 }
-                let was_occupied = self.assign_program(
-                    program_runtime_environment,
+            }
+            IndexImplementation::V2 {
+                loading_entries, ..
+            } => {
+                let loading_thread = loading_entries.get_mut().unwrap().remove(&(
                     key,
-                    last_modification_slot,
-                    loaded_program,
-                );
-                self.loading_task_waiter.notify();
-                was_occupied
+                    loaded_program.deployment_slot,
+                    program_runtime_environment.clone(),
+                ));
+                debug_assert_eq!(loading_thread, Some(thread::current().id()));
             }
         }
+        let was_occupied = self.assign_program(
+            program_runtime_environment,
+            key,
+            _last_modification_slot,
+            loaded_program,
+        );
+        self.loading_task_waiter.notify();
+        was_occupied
     }
 
     pub fn merge(
@@ -754,6 +973,9 @@ impl<FG: ForkGraph> ProgramCache<FG> {
         current_slot: Slot,
         modified_entries: &HashMap<Pubkey, Arc<ProgramCacheEntry>>,
     ) {
+        if matches!(&self.index, IndexImplementation::V2 { .. }) {
+            return;
+        }
         modified_entries.iter().for_each(|(key, entry)| {
             self.assign_program(
                 program_runtime_environment,
@@ -778,6 +1000,19 @@ impl<FG: ForkGraph> ProgramCache<FG> {
                         })
                 })
                 .collect(),
+            IndexImplementation::V2 { entries, .. } => entries
+                .iter()
+                .filter_map(
+                    |((id, deployment_slot, _program_runtime_environment), program)| match program
+                        .program
+                    {
+                        ProgramCacheEntryType::Loaded(_) => {
+                            Some((*id, *deployment_slot, program.clone()))
+                        }
+                        _ => None,
+                    },
+                )
+                .collect(),
         }
     }
 
@@ -791,31 +1026,42 @@ impl<FG: ForkGraph> ProgramCache<FG> {
                     second_level.iter().map(|program| (*id, program.clone()))
                 })
                 .collect(),
+            IndexImplementation::V2 { entries, .. } => entries
+                .iter()
+                .map(|((id, _slot, _program_runtime_environment), program)| (*id, program.clone()))
+                .collect(),
         }
     }
 
     /// Returns the slot versions for the given program id.
-    pub fn get_slot_versions_for_tests(&self, key: &Pubkey) -> &[Arc<ProgramCacheEntry>] {
+    pub fn get_slot_versions_for_tests(&self, key: &Pubkey) -> Vec<Arc<ProgramCacheEntry>> {
         match &self.index {
             IndexImplementation::V1 { entries, .. } => entries
                 .get(key)
-                .map(|second_level| second_level.as_ref())
-                .unwrap_or(&[]),
+                .map(|second_level| second_level.clone())
+                .unwrap_or(vec![]),
+            IndexImplementation::V2 { entries, .. } => entries
+                .iter()
+                .filter_map(
+                    |((id, _deployment_slot, _program_runtime_environment), entry)| {
+                        (id == key).then_some(entry.clone())
+                    },
+                )
+                .collect(),
         }
     }
 
     /// Unloads programs which were used infrequently
     pub fn sort_and_unload(&mut self, shrink_to_percent: Percent) {
         let mut sorted_candidates = self.get_flattened_entries();
-        sorted_candidates.sort_by_cached_key(|(_id, _last_modification_slot, program)| {
+        sorted_candidates.sort_by_cached_key(|(_id, _deployment_slot, program)| {
             program.stats.uses.load(Ordering::Relaxed)
         });
         let num_to_unload = sorted_candidates
             .len()
             .saturating_sub(percent_of_max_entries(shrink_to_percent));
-        for (program, last_modification_slot, entry) in sorted_candidates.iter().take(num_to_unload)
-        {
-            self.unload_program_entry(*program, *last_modification_slot, entry);
+        for (program, deployment_slot, entry) in sorted_candidates.iter().take(num_to_unload) {
+            self.unload_program_entry(*program, *deployment_slot, entry);
         }
     }
 
@@ -869,8 +1115,8 @@ impl<FG: ForkGraph> ProgramCache<FG> {
                     break;
                 }
             }
-            let (id, last_modification_slot, entry) = candidates.swap_remove(index);
-            self.unload_program_entry(id, last_modification_slot, &entry);
+            let (id, deployment_slot, entry) = candidates.swap_remove(index);
+            self.unload_program_entry(id, deployment_slot, &entry);
         }
     }
 
@@ -881,6 +1127,14 @@ impl<FG: ForkGraph> ProgramCache<FG> {
                 for k in keys {
                     entries.remove(&k);
                 }
+            }
+            IndexImplementation::V2 { entries, .. } => {
+                let keys = keys.collect::<HashSet<Pubkey>>();
+                entries.retain(
+                    |(id, _deployment_slot, _program_runtime_environment), _entry| {
+                        !keys.contains(id)
+                    },
+                )
             }
         }
     }
@@ -908,15 +1162,31 @@ impl<FG: ForkGraph> ProgramCache<FG> {
                     if candidate.stats.uses.load(Ordering::Relaxed) == 1 {
                         self.stats.one_hit_wonders.fetch_add(1, Ordering::Relaxed);
                     }
-                    self.stats
-                        .evictions
-                        .entry(id)
-                        .and_modify(|c| *c = c.saturating_add(1))
-                        .or_insert(1);
+                    *candidate = Arc::new(unloaded);
+                }
+            }
+            IndexImplementation::V2 { entries, .. } => {
+                let candidate = entries
+                    .get_mut(&(
+                        id,
+                        remove_entry.deployment_slot,
+                        remove_entry.program.get_environment().unwrap().clone(),
+                    ))
+                    .expect("Cache lookup failed");
+
+                if let Some(unloaded) = candidate.to_unloaded() {
+                    if candidate.stats.uses.load(Ordering::Relaxed) == 1 {
+                        self.stats.one_hit_wonders.fetch_add(1, Ordering::Relaxed);
+                    }
                     *candidate = Arc::new(unloaded);
                 }
             }
         }
+        self.stats
+            .evictions
+            .entry(id)
+            .and_modify(|c| *c = c.saturating_add(1))
+            .or_insert(1);
     }
 
     fn remove_programs_with_no_entries(&mut self) {
@@ -931,6 +1201,7 @@ impl<FG: ForkGraph> ProgramCache<FG> {
                     );
                 }
             }
+            IndexImplementation::V2 { .. } => {}
         }
     }
 }
@@ -1822,7 +2093,7 @@ pub(crate) mod tests {
                         program_id: key,
                         loader: entry.account_owner,
                         deployment_slot: entry.deployment_slot,
-                        last_modification_slot: entry.deployment_slot,
+                        last_modification_slot: entry.last_modification_slot,
                     })
             })
             .collect()

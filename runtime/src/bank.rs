@@ -1669,7 +1669,7 @@ impl Bank {
                 epoch_boundary_preparation.programs_to_recompile = program_cache_guard
                     .get_flattened_entries()
                     .into_iter()
-                    .map(|(id, _last_modification_slot, entry)| (id, entry))
+                    .map(|(id, _deployment_slot, entry)| (id, entry))
                     .collect();
                 epoch_boundary_preparation
                     .programs_to_recompile

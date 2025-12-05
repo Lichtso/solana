@@ -3276,7 +3276,7 @@ fn program_cache_stats() {
         &[&fee_payer_keypair],
         Hash::default(),
     ));
-    noop_tx_usage += 1;
+    // noop_tx_usage += 1;
 
     test_entry.drop_expected_account(buffer_address);
 
