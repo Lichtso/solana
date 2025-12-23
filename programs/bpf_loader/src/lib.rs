@@ -1529,7 +1529,6 @@ fn execute<'a, 'b: 'a>(
         };
         create_vm_time.stop();
 
-        vm.context_object_pointer.execute_time = Some(Measure::start("execute"));
         vm.registers[1] = ebpf::MM_INPUT_START;
 
         // SIMD-0321: Provide offset to instruction data in VM register 2.
@@ -1546,10 +1545,6 @@ fn execute<'a, 'b: 'a>(
         });
         drop(vm);
         invoke_context.insert_register_trace(register_trace);
-        if let Some(execute_time) = invoke_context.execute_time.as_mut() {
-            execute_time.stop();
-            invoke_context.timings.execute_us += execute_time.as_us();
-        }
 
         ic_logger_msg!(
             log_collector,

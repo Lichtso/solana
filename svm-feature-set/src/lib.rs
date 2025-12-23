@@ -9,6 +9,7 @@
 )]
 #[derive(Clone, Copy, Default)]
 pub struct SVMFeatureSet {
+    pub bin_index: usize,
     pub move_precompile_verification_to_svm: bool,
     pub stricter_abi_and_runtime_constraints: bool,
     pub account_data_direct_mapping: bool,
@@ -58,6 +59,7 @@ pub struct SVMFeatureSet {
 impl SVMFeatureSet {
     pub fn all_enabled() -> Self {
         Self {
+            bin_index: 0,
             move_precompile_verification_to_svm: true,
             stricter_abi_and_runtime_constraints: true,
             account_data_direct_mapping: true,

@@ -931,13 +931,73 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
             })
         }
 
+        let enable_second_replay = true;
         let lamports_before_tx =
             transaction_accounts_lamports_sum(&transaction_accounts).unwrap_or(0);
-        let transaction_accounts_before_tx = transaction_accounts
+        /*let transaction_accounts_before_tx = transaction_accounts
             .iter()
             .map(|(key, acc)| (key.clone(), acc.clone()))
             .collect::<Vec<_>>();
         let mut program_cache_for_tx_batch_before_tx = program_cache_for_tx_batch.clone();
+        let second_replay_result = if enable_second_replay {
+            let mut transaction_context = TransactionContext::new(
+                transaction_accounts_before_tx,
+                environment.rent.clone(),
+                compute_budget.max_instruction_stack_depth,
+                compute_budget.max_instruction_trace_length,
+            );
+
+            let log_collector = match config.log_messages_bytes_limit {
+                None => Some(LogCollector::new_ref()),
+                Some(log_messages_bytes_limit) => Some(LogCollector::new_ref_with_limit(Some(
+                    log_messages_bytes_limit,
+                ))),
+            };
+
+            let mut feature_set = environment.feature_set;
+            feature_set.stricter_abi_and_runtime_constraints = true;
+            // feature_set.account_data_direct_mapping = true;
+
+            let sysvar_cache = &self.sysvar_cache.read().unwrap();
+            let mut invoke_context = InvokeContext::new(
+                &mut transaction_context,
+                &mut program_cache_for_tx_batch_before_tx,
+                EnvironmentConfig::new(
+                    environment.blockhash,
+                    environment.blockhash_lamports_per_signature,
+                    callback,
+                    &feature_set,
+                    &environment.program_runtime_environments_for_execution,
+                    &environment.program_runtime_environments_for_deployment,
+                    sysvar_cache,
+                ),
+                log_collector.clone(),
+                compute_budget,
+                self.execution_cost,
+            );
+
+            let mut execute_timings = execute_timings.clone();
+            let mut executed_units = 0u64;
+            let process_result = process_message(
+                tx,
+                &loaded_transaction.program_indices,
+                &mut invoke_context,
+                &mut execute_timings,
+                &mut executed_units,
+            );
+
+            let log_collector = invoke_context.get_log_collector().unwrap();
+            let logs = log_collector.borrow().messages.to_owned();
+            drop(invoke_context);
+
+            Some((
+                ExecutionRecord::from(transaction_context),
+                logs,
+                process_result,
+            ))
+        } else {
+            None
+        };*/
 
         let mut transaction_context = TransactionContext::new(
             transaction_accounts,
@@ -949,7 +1009,6 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         let pre_account_state_info =
             TransactionAccountStateInfo::new(&transaction_context, tx, &environment.rent);
 
-        let enable_second_replay = true;
         let log_collector = if config.recording_config.enable_log_recording || enable_second_replay
         {
             match config.log_messages_bytes_limit {
@@ -1024,65 +1083,6 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                 err
             });
 
-        let second_replay_result = if enable_second_replay {
-            let mut transaction_context = TransactionContext::new(
-                transaction_accounts_before_tx,
-                environment.rent.clone(),
-                compute_budget.max_instruction_stack_depth,
-                compute_budget.max_instruction_trace_length,
-            );
-
-            let log_collector = match config.log_messages_bytes_limit {
-                None => Some(LogCollector::new_ref()),
-                Some(log_messages_bytes_limit) => Some(LogCollector::new_ref_with_limit(Some(
-                    log_messages_bytes_limit,
-                ))),
-            };
-
-            let mut feature_set = environment.feature_set;
-            feature_set.stricter_abi_and_runtime_constraints = true;
-
-            let sysvar_cache = &self.sysvar_cache.read().unwrap();
-            let mut invoke_context = InvokeContext::new(
-                &mut transaction_context,
-                &mut program_cache_for_tx_batch_before_tx,
-                EnvironmentConfig::new(
-                    environment.blockhash,
-                    environment.blockhash_lamports_per_signature,
-                    callback,
-                    &feature_set,
-                    &environment.program_runtime_environments_for_execution,
-                    &environment.program_runtime_environments_for_deployment,
-                    sysvar_cache,
-                ),
-                log_collector.clone(),
-                compute_budget,
-                self.execution_cost,
-            );
-
-            let mut execute_timings = execute_timings.clone();
-            let mut executed_units = 0u64;
-            let process_result = process_message(
-                tx,
-                &loaded_transaction.program_indices,
-                &mut invoke_context,
-                &mut execute_timings,
-                &mut executed_units,
-            );
-
-            let log_collector = invoke_context.get_log_collector().unwrap();
-            let logs = log_collector.borrow().messages.to_owned();
-            drop(invoke_context);
-
-            Some((
-                ExecutionRecord::from(transaction_context),
-                logs,
-                process_result,
-            ))
-        } else {
-            None
-        };
-
         let log_messages: Option<TransactionLogMessages> =
             log_collector.and_then(|log_collector| {
                 Rc::try_unwrap(log_collector)
@@ -1102,7 +1102,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
             accounts_resize_delta: accounts_data_len_delta,
         } = execution_record;
 
-        if let Some((
+        /*if let Some((
             second_replay_execution_record,
             second_replay_logs,
             second_replay_process_result,
@@ -1251,7 +1251,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                     }
                 }
             }
-        }
+        }*/
 
         if status.is_ok()
             && transaction_accounts_lamports_sum(&accounts)

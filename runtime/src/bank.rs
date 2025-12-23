@@ -120,7 +120,9 @@ use {
     solana_packet::PACKET_DATA_SIZE,
     solana_precompile_error::PrecompileError,
     solana_program_runtime::{
-        invoke_context::BuiltinFunctionWithContext,
+        invoke_context::{
+            BuiltinFunctionWithContext, DETAILED_TRANSACTION_COUNTERS, GENERAL_TRANSACTION_COUNTERS,
+        },
         loaded_programs::{ProgramCacheEntry, ProgramRuntimeEnvironments},
     },
     solana_pubkey::{Pubkey, PubkeyHasherBuilder},
@@ -1587,6 +1589,27 @@ impl Bank {
             .write()
             .unwrap()
             .prune(new_root_slot, upcoming_environments);
+        use std::io::prelude::*;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(false)
+            .open("/home/sol/logs/transaction_counters.csv")
+            .unwrap();
+        for value in GENERAL_TRANSACTION_COUNTERS.iter() {
+            write!(file, "{:>8},", value.load(Ordering::Relaxed)).unwrap();
+        }
+        writeln!(file, "").unwrap();
+        for per_account_size_sum in DETAILED_TRANSACTION_COUNTERS.iter() {
+            for per_cu_cost in per_account_size_sum.iter() {
+                for per_time_taken in per_cu_cost.iter() {
+                    write!(file, "{:>8},", per_time_taken.load(Ordering::Relaxed)).unwrap();
+                }
+                writeln!(file, "").unwrap();
+            }
+            writeln!(file, "").unwrap();
+        }
+        info!("Saved transaction_counters.csv");
     }
 
     pub fn prune_program_cache_by_deployment_slot(&self, deployment_slot: Slot) {

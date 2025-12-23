@@ -111,6 +111,7 @@ impl FeatureSet {
 
     pub fn runtime_features(&self) -> SVMFeatureSet {
         SVMFeatureSet {
+            bin_index: 0,
             move_precompile_verification_to_svm: self
                 .is_active(&move_precompile_verification_to_svm::id()),
             stricter_abi_and_runtime_constraints: self

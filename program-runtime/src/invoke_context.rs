@@ -49,6 +49,11 @@ pub type BuiltinFunctionWithContext = BuiltinFunction<InvokeContext<'static, 'st
 pub type Executable = GenericExecutable<InvokeContext<'static, 'static>>;
 pub type RegisterTrace<'a> = &'a [[u64; 12]];
 
+pub static DETAILED_TRANSACTION_COUNTERS: [[[std::sync::atomic::AtomicU64; 32]; 32]; 32] =
+    [const { [const { [const { std::sync::atomic::AtomicU64::new(0) }; 32] }; 32] }; 32];
+pub static GENERAL_TRANSACTION_COUNTERS: [std::sync::atomic::AtomicU64; 4] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+
 /// Adapter so we can unify the interfaces of built-in programs and syscalls
 #[macro_export]
 macro_rules! declare_process_instruction {
@@ -197,8 +202,7 @@ pub struct InvokeContext<'a, 'ix_data> {
     /// the designated compute budget during program execution.
     compute_meter: RefCell<u64>,
     log_collector: Option<Rc<RefCell<LogCollector>>>,
-    /// Latest measurement not yet accumulated in [ExecuteDetailsTimings::execute_us]
-    pub execute_time: Option<Measure>,
+    pub time_and_cu_accumulators: [(u64, u64); 8],
     pub timings: ExecuteDetailsTimings,
     pub syscall_context: Vec<Option<SyscallContext>>,
     /// Pairs of index in TX instruction trace and VM register trace
@@ -223,7 +227,7 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
             compute_budget,
             execution_cost,
             compute_meter: RefCell::new(compute_budget.compute_unit_limit),
-            execute_time: None,
+            time_and_cu_accumulators: [(0, 0); 8],
             timings: ExecuteDetailsTimings::default(),
             syscall_context: Vec::new(),
             register_traces: Vec::new(),
@@ -511,6 +515,22 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
         timings: &mut ExecuteTimings,
     ) -> Result<(), InstructionError> {
         let instruction_context = self.transaction_context.get_current_instruction_context()?;
+        let account_size_sum = (0..instruction_context.get_number_of_instruction_accounts()).fold(
+            0,
+            |mut accumulator, index| {
+                if instruction_context
+                    .is_instruction_account_duplicate(index)
+                    .unwrap()
+                    .is_none()
+                {
+                    let instruction_account = instruction_context
+                        .try_borrow_instruction_account(index)
+                        .unwrap();
+                    accumulator += instruction_account.get_data().len();
+                }
+                accumulator
+            },
+        ) as u64;
         let process_executable_chain_time = Measure::start("process_executable_chain_time");
 
         let builtin_id = {
@@ -595,10 +615,52 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
             return Err(InstructionError::BuiltinProgramsMustConsumeComputeUnits);
         }
 
-        timings
-            .execute_accessories
-            .process_instructions
-            .process_executable_chain_us += process_executable_chain_time.end_as_us();
+        let process_executable_chain_time = process_executable_chain_time.end_as_us();
+        self.time_and_cu_accumulators[self.syscall_context.len() - 1].0 +=
+            process_executable_chain_time;
+        self.time_and_cu_accumulators[self.syscall_context.len() - 1].1 += *compute_units_consumed;
+        let time_bin = (((process_executable_chain_time
+            .saturating_sub(self.time_and_cu_accumulators[self.syscall_context.len()].0)
+            as f64
+            / 5.0
+            + 0.0001)
+            .ln()
+            / 1.3_f64.ln()) as usize)
+            .min(31);
+        let cu_bin = (*compute_units_consumed)
+            .saturating_sub(self.time_and_cu_accumulators[self.syscall_context.len()].1)
+            .saturating_add(1)
+            .ilog2()
+            .min(31) as usize;
+        self.time_and_cu_accumulators[self.syscall_context.len()] = (0, 0);
+        if self.syscall_context.last().unwrap().is_some()
+            && !self.get_feature_set().stricter_abi_and_runtime_constraints
+        {
+            let account_size_bin = account_size_sum.saturating_add(1).ilog2().min(31) as usize;
+            DETAILED_TRANSACTION_COUNTERS
+                [account_size_bin]
+                [cu_bin]
+                [time_bin]
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            GENERAL_TRANSACTION_COUNTERS[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            GENERAL_TRANSACTION_COUNTERS[1]
+                .fetch_add(account_size_sum, std::sync::atomic::Ordering::Relaxed);
+            GENERAL_TRANSACTION_COUNTERS[2].fetch_add(
+                *compute_units_consumed,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            GENERAL_TRANSACTION_COUNTERS[3].fetch_add(
+                process_executable_chain_time,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+
+        if self.syscall_context.len() == 1 {
+            timings
+                .execute_accessories
+                .process_instructions
+                .process_executable_chain_us += process_executable_chain_time;
+        }
         result
     }
 
