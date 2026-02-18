@@ -26,8 +26,7 @@ use {
     solana_hash::Hash,
     solana_instruction::TRANSACTION_LEVEL_STACK_HEIGHT,
     solana_message::{
-        compiled_instruction::CompiledInstruction,
-        inner_instruction::{InnerInstruction, InnerInstructionsList},
+        compiled_instruction::CompiledInstruction, inner_instruction::InnerInstruction,
     },
     solana_nonce::{
         NONCED_TX_MARKER_IX_INDEX,
@@ -61,6 +60,7 @@ use {
     solana_transaction_context::transaction::{ExecutionRecord, TransactionContext},
     solana_transaction_error::{TransactionError, TransactionResult},
     std::{
+        cell::RefCell,
         collections::HashSet,
         fmt::{Debug, Formatter},
         rc::Rc,
@@ -1165,15 +1165,12 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
             let process_result = invoke_context
                 .process_message(tx, &mut execute_timings, &mut executed_units)
                 .map_err(|(index, err)| TransactionError::InstructionError(index, err));
-
-            let log_collector = invoke_context.get_log_collector().unwrap();
-            let logs = log_collector.borrow().messages.to_owned();
             drop(invoke_context);
 
-            let (execution_record, _inner_instructions) =
-                Self::deconstruct_transaction(transaction_context, false);
+            let (execution_record, log_messages, _inner_instructions) =
+                Self::deconstruct_transaction(transaction_context, log_collector, false);
 
-            Some((execution_record, logs, process_result))
+            Some((execution_record, log_messages, process_result))
         } else {
             None
         };
@@ -1210,15 +1207,9 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                 err
             });
 
-        let log_messages: Option<TransactionLogMessages> =
-            log_collector.and_then(|log_collector| {
-                Rc::try_unwrap(log_collector)
-                    .map(|log_collector| log_collector.into_inner().into_messages())
-                    .ok()
-            });
-
-        let (execution_record, inner_instructions) = Self::deconstruct_transaction(
+        let (execution_record, log_messages, inner_instructions) = Self::deconstruct_transaction(
             transaction_context,
+            log_collector,
             config.recording_config.enable_cpi_recording,
         );
 
@@ -1293,8 +1284,45 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
     /// Extract an ExecutionRecord and an InnerInstructionsList from a TransactionContext
     fn deconstruct_transaction(
         mut transaction_context: TransactionContext,
+        log_collector: Option<Rc<RefCell<LogCollector>>>,
         record_inner_instructions: bool,
-    ) -> (ExecutionRecord, Option<InnerInstructionsList>) {
+    ) -> (
+        ExecutionRecord,
+        Option<Vec<String>>,
+        Option<Vec<Vec<InnerInstruction>>>,
+    ) {
+        let mut log_messages: Option<TransactionLogMessages> =
+            log_collector.and_then(|log_collector: Rc<RefCell<LogCollector>>| {
+                Rc::try_unwrap(log_collector)
+                    .map(|log_collector| log_collector.into_inner().into_messages())
+                    .ok()
+            });
+
+        if let Some(log_messages) = log_messages.as_mut() {
+            let mut messages_per_instruction: Vec<Vec<&String>> = vec![];
+            for message in log_messages.iter() {
+                if messages_per_instruction.is_empty()
+                    || (message.starts_with("Program ")
+                        && !message.starts_with("Program log: ")
+                        && !message.starts_with("Program data: ")
+                        && !message.starts_with("Program return: ")
+                        && (message.contains("invoke") || message.contains("continue")))
+                {
+                    messages_per_instruction.push(Vec::new());
+                }
+                messages_per_instruction.last_mut().unwrap().push(message);
+            }
+            *log_messages = messages_per_instruction
+                .iter()
+                .map(|messages| {
+                    messages
+                        .iter()
+                        .map(|string| format!("{}\n", string))
+                        .collect::<String>()
+                })
+                .collect();
+        }
+
         let inner_ix = if record_inner_instructions {
             debug_assert!(
                 transaction_context
@@ -1379,7 +1407,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
 
         let record: ExecutionRecord = transaction_context.into();
 
-        (record, inner_ix)
+        (record, log_messages, inner_ix)
     }
 
     pub fn fill_missing_sysvar_cache_entries<CB: TransactionProcessingCallback>(
