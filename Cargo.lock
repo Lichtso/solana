@@ -9726,6 +9726,7 @@ dependencies = [
  "assert_matches",
  "base64 0.22.1",
  "bincode",
+ "blake3",
  "cfg-if 1.0.4",
  "itertools 0.14.0",
  "libsecp256k1",

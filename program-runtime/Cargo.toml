@@ -81,6 +81,7 @@ solana-sysvar-id = { workspace = true }
 solana-transaction-context = { workspace = true }
 thiserror = { workspace = true }
 wincode = { workspace = true }
+blake3 = { workspace = true }
 
 [dev-dependencies]
 assert_matches = { workspace = true }

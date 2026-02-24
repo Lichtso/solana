@@ -469,7 +469,7 @@ impl TransactionAccounts {
         self.resize_delta.get()
     }
 
-    pub(crate) fn account_key(&self, index: IndexOfAccount) -> Option<&Pubkey> {
+    pub fn account_key(&self, index: IndexOfAccount) -> Option<&Pubkey> {
         // SAFETY: We never modify an account key, so returning a reference to it is safe.
         unsafe {
             self.shared_account_fields

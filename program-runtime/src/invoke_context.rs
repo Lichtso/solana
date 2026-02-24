@@ -630,6 +630,48 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
             .and(self.pop())
     }
 
+    fn compute_instruction_account_hash(&self) -> u64 {
+        let mut buffer = [0u8; 44];
+        let mut hasher = blake3::Hasher::new();
+        let instruction_context = self
+            .transaction_context
+            .get_current_instruction_context()
+            .unwrap();
+        for instruction_account_index in 0..instruction_context.get_number_of_instruction_accounts()
+        {
+            let transaction_account_index = instruction_context
+                .get_index_of_instruction_account_in_transaction(instruction_account_index)
+                .unwrap();
+            buffer[0] = transaction_account_index as u8;
+            buffer[1] = instruction_context
+                .is_instruction_account_signer(instruction_account_index)
+                .unwrap() as u8;
+            buffer[2] = instruction_context
+                .is_instruction_account_writable(instruction_account_index)
+                .unwrap() as u8;
+            use solana_account::ReadableAccount;
+            let account = self
+                .transaction_context
+                .accounts()
+                .try_borrow(transaction_account_index)
+                .unwrap();
+            buffer[4..36].copy_from_slice(account.owner().as_ref());
+            buffer[36..44].copy_from_slice(&account.lamports().to_le_bytes());
+            hasher.update(&buffer);
+            if instruction_context
+                .is_instruction_account_duplicate(instruction_account_index)
+                .unwrap()
+                .is_none()
+            {
+                hasher.update(account.data());
+            }
+        }
+        let mut output = hasher.finalize_xof();
+        let mut result = [0u8; 8];
+        output.fill(&mut result);
+        u64::from_le_bytes(result)
+    }
+
     /// Calls the instruction's program entrypoint method
     fn process_executable_chain(
         &mut self,
@@ -669,12 +711,31 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
         }
         .ok_or(InstructionError::UnsupportedProgramId)?;
 
+        let instruction_data_hash = {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(instruction_context.get_instruction_data());
+            let mut output = hasher.finalize_xof();
+            let mut result = [0u8; 8];
+            output.fill(&mut result);
+            u64::from_le_bytes(result)
+        };
         let program_id = *instruction_context.get_program_key()?;
         self.transaction_context
             .set_return_data(program_id, Vec::new())?;
         let logger = self.get_log_collector();
-        stable_log::program_invoke(&logger, &program_id, self.get_stack_height());
+        solana_svm_log_collector::ic_logger_msg!(
+            logger,
+            "Instruction data hash {:016X?}",
+            instruction_data_hash,
+        );
+        solana_svm_log_collector::ic_logger_msg!(
+            logger,
+            "Serialization hash {:016X?}",
+            self.compute_instruction_account_hash(),
+        );
         let pre_remaining_units = self.get_remaining();
+        solana_svm_log_collector::ic_logger_msg!(logger, "Remaining CUs {}", pre_remaining_units,);
+        stable_log::program_invoke(&logger, &program_id, self.get_stack_height());
         // For now, only built-ins are invoked from here, so the VM and its Config are irrelevant.
         self.memory_contexts
             .set_memory_context_abi_v1(MemoryContext::new(
@@ -702,7 +763,26 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
         vm.invoke_function(function);
         let result = match vm.program_result {
             ProgramResult::Ok(_) => {
+                solana_svm_log_collector::ic_logger_msg!(
+                    logger,
+                    "Deserialization hash {:016X?}",
+                    self.compute_instruction_account_hash()
+                );
                 stable_log::program_success(&logger, &program_id);
+                if self.get_stack_height() > 1 {
+                    solana_svm_log_collector::ic_logger_msg!(
+                        logger,
+                        "Program {} continue [{}]",
+                        self.transaction_context
+                            .get_instruction_context_at_nesting_level(
+                                self.get_stack_height().saturating_sub(2),
+                            )
+                            .unwrap()
+                            .get_program_key()
+                            .unwrap(),
+                        self.get_stack_height().saturating_sub(1),
+                    );
+                }
                 Ok(())
             }
             ProgramResult::Err(ref err) => {
