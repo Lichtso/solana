@@ -677,6 +677,11 @@ impl<FG: ForkGraph> ProgramCache<FG> {
                 }
                 // Then delete everything which is not the newest deployment
                 // on the fork of `new_root_slot` or newer forks thereof.
+                log::info!(
+                    "ProgramCache::prune() latest_root_slot={} new_root_slot={}",
+                    self.latest_root_slot,
+                    new_root_slot
+                );
                 entries.retain(
                     |(id, deployment_slot, program_runtime_environment), entry| {
                         // Clean up tombstones and unloaded entries
@@ -713,6 +718,16 @@ impl<FG: ForkGraph> ProgramCache<FG> {
                                 .prunes_environment
                                 .fetch_add(1, Ordering::Relaxed);
                             keep = false;
+                        }
+                        if matches!(entry.program, ProgramCacheEntryType::Builtin(_)) {
+                            log::info!(
+                                "ProgramCacheEntryType::Builtin {:?} {:?} {} {} {}",
+                                id,
+                                latest_slot_per_key.get(id),
+                                last_modification_slot,
+                                entry.deployment_slot,
+                                keep
+                            );
                         }
                         keep
                     },
@@ -974,6 +989,10 @@ impl<FG: ForkGraph> ProgramCache<FG> {
         modified_entries: &HashMap<Pubkey, Arc<ProgramCacheEntry>>,
     ) {
         if matches!(&self.index, IndexImplementation::V2 { .. }) {
+            log::info!(
+                "ProgramCache::program_runtime_environment() {:?}",
+                modified_entries,
+            );
             return;
         }
         modified_entries.iter().for_each(|(key, entry)| {
@@ -1017,18 +1036,19 @@ impl<FG: ForkGraph> ProgramCache<FG> {
     }
 
     /// Returns the list of all entries in the cache.
-    #[cfg(feature = "dev-context-only-utils")]
-    pub fn get_flattened_entries_for_tests(&self) -> Vec<(Pubkey, Arc<ProgramCacheEntry>)> {
+    pub fn get_flattened_entries_for_tests(&self) -> Vec<(Pubkey, Slot, Arc<ProgramCacheEntry>)> {
         match &self.index {
             IndexImplementation::V1 { entries, .. } => entries
                 .iter()
                 .flat_map(|(id, second_level)| {
-                    second_level.iter().map(|program| (*id, program.clone()))
+                    second_level.iter().map(|program| (*id, 0, program.clone()))
                 })
                 .collect(),
             IndexImplementation::V2 { entries, .. } => entries
                 .iter()
-                .map(|((id, _slot, _program_runtime_environment), program)| (*id, program.clone()))
+                .map(|((id, slot, _program_runtime_environment), program)| {
+                    (*id, *slot, program.clone())
+                })
                 .collect(),
         }
     }

@@ -1,7 +1,7 @@
 #[cfg(feature = "metrics")]
 use solana_svm_timings::ExecuteDetailsTimings;
 use {
-    crate::loaded_programs::ForkGraph,
+    crate::loaded_programs::{ForkGraph, IndexImplementation},
     log::{debug, log_enabled, trace},
     solana_pubkey::Pubkey,
     std::{
@@ -269,20 +269,17 @@ impl LoadProgramMetrics {
 
 impl<FG: ForkGraph> crate::loaded_programs::ProgramCache<FG> {
     /// Log per-entry statistics for each entry in the global cache.
-    #[cfg(feature = "dev-context-only-utils")]
     pub fn output_entry_stats(&self) {
         use {crate::program_cache_entry::ProgramCacheEntryType, std::fmt::Write};
         // The entry stats can become very verbose after some runtime. Rather than dumping them
         // to the log, we'd rather maintain a continuously updated file instead...
-        static ENTRY_STAT_PATH: std::sync::LazyLock<Option<std::ffi::OsString>> =
-            std::sync::LazyLock::new(|| std::env::var_os("AGAVE_PROGRAM_CACHE_ENTRY_STATS_PATH"));
-        let Some(stat_path) = &*ENTRY_STAT_PATH else {
-            log::trace!("Set AGAVE_PROGRAM_CACHE_ENTRY_STATS_PATH to write per-entry stats");
-            return;
+        let stat_path = match &self.index {
+            IndexImplementation::V1 { .. } => "/home/sol/reports/program_cache_v1",
+            IndexImplementation::V2 { .. } => "/home/sol/reports/program_cache_v2",
         };
         let mut output = String::new();
         let entries = self.get_flattened_entries_for_tests();
-        for (addr, entry) in entries {
+        for (addr, slot, entry) in entries {
             let entry_ty = match &entry.program {
                 ProgramCacheEntryType::FailedVerification(_) => "FailedVerification",
                 ProgramCacheEntryType::Closed => "Closed",
@@ -313,7 +310,7 @@ impl<FG: ForkGraph> crate::loaded_programs::ProgramCache<FG> {
             let interpema = stats.interpretation_time_ema.load(Ordering::Relaxed) / EMA_SCALE;
             let _ = writeln!(
                 &mut output,
-                "{addr},{entry_ty},{uses},{compiles},{comptime},{comptime_ema},{invokes},\
+                "{addr},{slot},{entry_ty},{uses},{compiles},{comptime},{comptime_ema},{invokes},\
                  {jittime},{jittime_ema},{interps},{interptime},{interpema}"
             );
         }
