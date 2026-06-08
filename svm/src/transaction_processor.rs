@@ -203,7 +203,8 @@ pub struct TransactionBatchProcessor<FG: ForkGraph> {
     pub epoch_boundary_preparation: Arc<RwLock<EpochBoundaryPreparation>>,
 
     /// Programs required for transaction batch processing
-    pub global_program_cache: Arc<RwLock<ProgramCache<FG>>>,
+    pub global_program_cache_v1: Arc<RwLock<ProgramCache<FG>>>,
+    pub global_program_cache_v2: Arc<RwLock<ProgramCache<FG>>>,
 
     /// ProgramRuntimeEnvironment of the current epoch
     pub program_runtime_environment: ProgramRuntimeEnvironment,
@@ -233,7 +234,8 @@ impl<FG: ForkGraph> Debug for TransactionBatchProcessor<FG> {
             .field("slot", &self.slot)
             .field("epoch", &self.epoch)
             .field("sysvar_cache", &self.sysvar_cache)
-            .field("global_program_cache", &self.global_program_cache)
+            .field("global_program_cache_v1", &self.global_program_cache_v1)
+            .field("global_program_cache_v2", &self.global_program_cache_v2)
             .finish()
     }
 }
@@ -245,7 +247,14 @@ impl<FG: ForkGraph> Default for TransactionBatchProcessor<FG> {
             epoch: Epoch::default(),
             sysvar_cache: RwLock::<SysvarCache>::default(),
             epoch_boundary_preparation: Arc::new(RwLock::new(EpochBoundaryPreparation::default())),
-            global_program_cache: Arc::new(RwLock::new(ProgramCache::new(Slot::default(), false))),
+            global_program_cache_v1: Arc::new(RwLock::new(ProgramCache::new(
+                Slot::default(),
+                false,
+            ))),
+            global_program_cache_v2: Arc::new(RwLock::new(ProgramCache::new(
+                Slot::default(),
+                true,
+            ))),
             program_runtime_environment: ProgramRuntimeEnvironment::from(
                 BuiltinProgram::new_loader(VmConfig::default()),
             ),
@@ -273,7 +282,8 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
             slot,
             epoch,
             epoch_boundary_preparation,
-            global_program_cache: Arc::new(RwLock::new(ProgramCache::new(slot, false))),
+            global_program_cache_v1: Arc::new(RwLock::new(ProgramCache::new(slot, false))),
+            global_program_cache_v2: Arc::new(RwLock::new(ProgramCache::new(slot, true))),
             builtin_program_cache: RwLock::new(ProgramCacheForTxBatch::new(slot)),
             ..Self::default()
         }
@@ -357,7 +367,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                 last_modification_slot: 0,
             })
             .collect();
-        self.global_program_cache.read().unwrap().extract(
+        self.global_program_cache_v1.read().unwrap().extract(
             &mut search_for,
             &mut builtin_program_cache,
             &environments,
@@ -372,13 +382,35 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
             "builtin(s) registered on this fork but missing from the global program cache: \
              {search_for:?}"
         );
+        let mut builtin_program_cache_v2 = ProgramCacheForTxBatch::new(slot);
+        let mut search_for: Vec<ProgramToLoad> = builtin_program_ids
+            .iter()
+            .map(|program_id| ProgramToLoad {
+                program_id,
+                loader: ProgramCacheEntryOwner::NativeLoader,
+                deployment_slot: 0,
+                last_modification_slot: 0,
+            })
+            .collect();
+        self.global_program_cache_v2.read().unwrap().extract(
+            &mut search_for,
+            &mut builtin_program_cache_v2,
+            &environments,
+            false,
+            false,
+        );
+        assert_eq!(
+            &builtin_program_cache.entries,
+            &builtin_program_cache_v2.entries
+        );
 
         Self {
             slot,
             epoch,
             sysvar_cache: RwLock::<SysvarCache>::default(),
             epoch_boundary_preparation: self.epoch_boundary_preparation.clone(),
-            global_program_cache: self.global_program_cache.clone(),
+            global_program_cache_v1: self.global_program_cache_v1.clone(),
+            global_program_cache_v2: self.global_program_cache_v2.clone(),
             program_runtime_environment: environments,
             builtin_program_ids: RwLock::new(builtin_program_ids),
             builtin_program_cache: RwLock::new(builtin_program_cache),
@@ -412,7 +444,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                 // Use the prediction if equal but not identical
                 self.program_runtime_environment = upcoming_environment;
             }
-            self.global_program_cache
+            self.global_program_cache_v2
                 .write()
                 .unwrap()
                 .forward_builtins_to_new_environment(&self.program_runtime_environment);
@@ -698,7 +730,14 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         if program_cache_for_tx_batch.loaded_missing || program_cache_for_tx_batch.merged_modified {
             // NOTE: this is a percentage; do not set above 100.
             const SHRINK_LOADED_PROGRAMS_TO_PERCENTAGE: Percent = 90;
-            self.global_program_cache
+            self.global_program_cache_v1
+                .write()
+                .unwrap()
+                .evict_using_random_selection(
+                    SHRINK_LOADED_PROGRAMS_TO_PERCENTAGE,
+                    self.slot,
+                );
+            self.global_program_cache_v2
                 .write()
                 .unwrap()
                 .evict_using_random_selection(SHRINK_LOADED_PROGRAMS_TO_PERCENTAGE, self.slot);
@@ -930,37 +969,54 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
     fn replenish_program_cache<CB: TransactionProcessingCallback>(
         &self,
         account_loader: &AccountLoader<CB>,
-        mut missing_programs: Vec<ProgramToLoad>,
+        mut missing_programs_v2: Vec<ProgramToLoad>,
         program_runtime_environment_for_execution: &ProgramRuntimeEnvironment,
-        program_cache_for_tx_batch: &mut ProgramCacheForTxBatch,
+        program_cache_for_tx_batch_v2: &mut ProgramCacheForTxBatch,
         execute_timings: &mut ExecuteTimings,
         limit_to_load_programs: bool,
         increment_usage_counter: bool,
     ) {
-        if missing_programs.is_empty() {
+        if missing_programs_v2.is_empty() {
             // Nothing to load, so skip the global cache and fork graph locks.
             // Program-cache hit/miss counters are unchanged for empty work.
             return;
         }
         let mut count_hits_and_misses = true;
+        let mut missing_programs_v1 = missing_programs_v2.clone();
+        let mut program_cache_for_tx_batch_v1 = program_cache_for_tx_batch_v2.clone();
         loop {
             // Lock the global cache.
-            let global_program_cache = self.global_program_cache.read().unwrap();
+            let global_program_cache = self.global_program_cache_v1.read().unwrap();
             // Figure out which program needs to be loaded next.
-            let program_to_load = global_program_cache.extract(
-                &mut missing_programs,
-                program_cache_for_tx_batch,
+            let program_to_load_v1 = global_program_cache.extract(
+                &mut missing_programs_v1,
+                &mut program_cache_for_tx_batch_v1,
+                program_runtime_environment_for_execution,
+                increment_usage_counter,
+                count_hits_and_misses,
+            );
+            let task_waiter_v1 = Arc::clone(&global_program_cache.loading_task_waiter);
+            let task_cookie_v1 = task_waiter_v1.cookie();
+            // Unlock the global cache again.
+            drop(global_program_cache);
+
+            // Lock the global cache.
+            let global_program_cache = self.global_program_cache_v2.read().unwrap();
+            // Figure out which program needs to be loaded next.
+            let program_to_load_v2 = global_program_cache.extract(
+                &mut missing_programs_v2,
+                program_cache_for_tx_batch_v2,
                 program_runtime_environment_for_execution,
                 increment_usage_counter,
                 count_hits_and_misses,
             );
             count_hits_and_misses = false;
-            let task_waiter = Arc::clone(&global_program_cache.loading_task_waiter);
-            let task_cookie = task_waiter.cookie();
+            let task_waiter_v2 = Arc::clone(&global_program_cache.loading_task_waiter);
+            let task_cookie_v2 = task_waiter_v2.cookie();
             // Unlock the global cache again.
             drop(global_program_cache);
 
-            let program_to_store = program_to_load.map(|key| {
+            let program_to_store_v1 = program_to_load_v1.map(|key| {
                 // Load, verify and compile one program.
                 let (program, last_modification_slot) = load_program_with_pubkey(
                     account_loader,
@@ -973,9 +1029,22 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                 (key, program, last_modification_slot)
             });
 
-            if let Some((key, program, last_modification_slot)) = program_to_store {
-                program_cache_for_tx_batch.loaded_missing = true;
-                let mut global_program_cache = self.global_program_cache.write().unwrap();
+            let program_to_store_v2 = program_to_load_v2.map(|key| {
+                // Load, verify and compile one program.
+                let (program, last_modification_slot) = load_program_with_pubkey(
+                    account_loader,
+                    program_runtime_environment_for_execution,
+                    &key,
+                    self.slot,
+                    execute_timings,
+                )
+                .expect("called load_program_with_pubkey() with nonexistent account");
+                (key, program, last_modification_slot)
+            });
+
+            if let Some((key, program, last_modification_slot)) = program_to_store_v1 {
+                program_cache_for_tx_batch_v1.loaded_missing = true;
+                let mut global_program_cache = self.global_program_cache_v1.write().unwrap();
                 // Submit our last completed loading task.
                 if global_program_cache.finish_cooperative_loading_task(
                     program_runtime_environment_for_execution,
@@ -988,22 +1057,74 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                     // This branch is taken when there is an error in assigning a program to a
                     // cache slot. It is not possible to mock this error for SVM unit
                     // tests purposes.
-                    *program_cache_for_tx_batch = ProgramCacheForTxBatch::new(self.slot);
-                    program_cache_for_tx_batch.hit_max_limit = true;
+                    *program_cache_for_tx_batch_v2 = ProgramCacheForTxBatch::new(self.slot);
+                    program_cache_for_tx_batch_v2.hit_max_limit = true;
                     return;
                 }
-            } else if missing_programs.is_empty() {
-                break;
-            } else {
+            } else if !missing_programs_v1.is_empty() {
                 // Remember: there are multiple transaction processor threads running concurrently
                 // and those other threads may be loading this or other programs.
                 //
                 // So, sleep until some other thread submits a program with their
                 // `finish_cooperative_loading_task` call. We'll then wake up and try to load the
                 // missing programs inside the tx batch again.
-                let _new_cookie = task_waiter.wait(task_cookie);
+                let _new_cookie = task_waiter_v1.wait(task_cookie_v1);
+            }
+
+            if let Some((key, program, last_modification_slot)) = program_to_store_v2 {
+                program_cache_for_tx_batch_v2.loaded_missing = true;
+                let mut global_program_cache = self.global_program_cache_v2.write().unwrap();
+                // Submit our last completed loading task.
+                if global_program_cache.finish_cooperative_loading_task(
+                    program_runtime_environment_for_execution,
+                    self.slot,
+                    key,
+                    last_modification_slot,
+                    program,
+                ) && limit_to_load_programs
+                {
+                    // This branch is taken when there is an error in assigning a program to a
+                    // cache slot. It is not possible to mock this error for SVM unit
+                    // tests purposes.
+                    *program_cache_for_tx_batch_v2 = ProgramCacheForTxBatch::new(self.slot);
+                    program_cache_for_tx_batch_v2.hit_max_limit = true;
+                    return;
+                }
+            } else if !missing_programs_v2.is_empty() {
+                // Remember: there are multiple transaction processor threads running concurrently
+                // and those other threads may be loading this or other programs.
+                //
+                // So, sleep until some other thread submits a program with their
+                // `finish_cooperative_loading_task` call. We'll then wake up and try to load the
+                // missing programs inside the tx batch again.
+                let _new_cookie = task_waiter_v2.wait(task_cookie_v2);
+            }
+
+            if missing_programs_v1.is_empty() && missing_programs_v2.is_empty() {
+                break;
             }
         }
+
+        for (key, entry) in &program_cache_for_tx_batch_v1.entries {
+            assert_eq!(
+                Some(entry),
+                program_cache_for_tx_batch_v2.entries.get(key),
+                "{:?}",
+                key
+            );
+        }
+        for (key, entry) in &program_cache_for_tx_batch_v2.entries {
+            assert_eq!(
+                program_cache_for_tx_batch_v1.entries.get(key),
+                Some(entry),
+                "{:?}",
+                key
+            );
+        }
+        assert_eq!(
+            &program_cache_for_tx_batch_v1.entries,
+            &program_cache_for_tx_batch_v2.entries
+        );
     }
 
     /// Similar to replenish_program_cache() but only used in Bank::prepare_program_cache_for_upcoming_feature_set().
@@ -1025,7 +1146,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
             return;
         }
         let program_to_load = {
-            let program_cache_guard = self.global_program_cache.read().unwrap();
+            let program_cache_guard = self.global_program_cache_v2.read().unwrap();
             program_cache_guard.extract(
                 &mut missing_programs,
                 &mut program_cache_for_tx_batch,
@@ -1048,7 +1169,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
             .expect("called load_program_with_pubkey() with nonexistent account");
             recompiled.stats.merge_from(stats_of_enqueued_program);
             // Lock the global cache as writable this time.
-            let mut program_cache_guard = self.global_program_cache.write().unwrap();
+            let mut program_cache_guard = self.global_program_cache_v2.write().unwrap();
             // Submit our last completed loading task.
             program_cache_guard.finish_cooperative_loading_task(
                 upcoming_environment,
@@ -1401,12 +1522,24 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
     pub fn add_builtin(&self, program_id: Pubkey, builtin: ProgramCacheEntry) {
         self.builtin_program_ids.write().unwrap().insert(program_id);
         let entry = Arc::new(builtin);
-        self.global_program_cache.write().unwrap().assign_program(
-            &self.program_runtime_environment,
-            program_id,
-            0,
-            Arc::clone(&entry),
-        );
+        self.global_program_cache_v1
+            .write()
+            .unwrap()
+            .assign_program(
+                &self.program_runtime_environment,
+                program_id,
+                0,
+                Arc::clone(&entry),
+            );
+        self.global_program_cache_v2
+            .write()
+            .unwrap()
+            .assign_program(
+                &self.program_runtime_environment,
+                program_id,
+                0,
+                Arc::clone(&entry),
+            );
         self.builtin_program_cache
             .write()
             .unwrap()

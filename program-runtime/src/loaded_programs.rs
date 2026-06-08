@@ -285,7 +285,7 @@ impl<FG: ForkGraph> std::fmt::Debug for ProgramCache<FG> {
 pub struct ProgramCacheForTxBatch {
     /// Pubkey is the address of a program.
     /// ProgramCacheEntry is the corresponding program entry valid for the slot in which a transaction is being executed.
-    entries: HashMap<Pubkey, Arc<ProgramCacheEntry>>,
+    pub entries: HashMap<Pubkey, Arc<ProgramCacheEntry>>,
     /// Program entries modified during the transaction batch.
     modified_entries: HashMap<Pubkey, Arc<ProgramCacheEntry>>,
     slot: Slot,

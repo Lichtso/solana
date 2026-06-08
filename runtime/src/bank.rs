@@ -1589,17 +1589,29 @@ impl Bank {
             },
         );
 
+        parent
+            .transaction_processor
+            .global_program_cache_v1
+            .read()
+            .unwrap()
+            .output_entry_stats();
+        new.transaction_processor
+            .global_program_cache_v1
+            .write()
+            .unwrap()
+            .stats
+            .reset();
+
         report_loaded_programs_stats(
             &parent
                 .transaction_processor
-                .global_program_cache
+                .global_program_cache_v2
                 .read()
                 .unwrap(),
             parent.slot(),
         );
-
         new.transaction_processor
-            .global_program_cache
+            .global_program_cache_v2
             .write()
             .unwrap()
             .stats
@@ -1610,7 +1622,12 @@ impl Bank {
 
     pub fn set_fork_graph_in_program_cache(&self, fork_graph: Weak<RwLock<BankForks>>) {
         self.transaction_processor
-            .global_program_cache
+            .global_program_cache_v1
+            .write()
+            .unwrap()
+            .set_fork_graph(fork_graph.clone());
+        self.transaction_processor
+            .global_program_cache_v2
             .write()
             .unwrap()
             .set_fork_graph(fork_graph);
@@ -1663,7 +1680,7 @@ impl Bank {
                 upcoming_environment = new_environment;
                 let program_cache_guard = self
                     .transaction_processor
-                    .global_program_cache
+                    .global_program_cache_v2
                     .read()
                     .unwrap();
                 epoch_boundary_preparation.programs_to_recompile = program_cache_guard
@@ -1690,7 +1707,12 @@ impl Bank {
             .unwrap()
             .reroot(self.epoch());
         self.transaction_processor
-            .global_program_cache
+            .global_program_cache_v1
+            .write()
+            .unwrap()
+            .prune(self.slot(), upcoming_environment.clone(), bank_forks);
+        self.transaction_processor
+            .global_program_cache_v2
             .write()
             .unwrap()
             .prune(
@@ -1706,7 +1728,12 @@ impl Bank {
 
     pub fn prune_program_cache_by_deployment_slot(&self, deployment_slot: Slot) {
         self.transaction_processor
-            .global_program_cache
+            .global_program_cache_v1
+            .write()
+            .unwrap()
+            .prune_by_deployment_slot(deployment_slot);
+        self.transaction_processor
+            .global_program_cache_v2
             .write()
             .unwrap()
             .prune_by_deployment_slot(deployment_slot);
@@ -4425,7 +4452,7 @@ impl Bank {
                         cache
                             .get_or_insert_with(|| {
                                 self.transaction_processor
-                                    .global_program_cache
+                                    .global_program_cache_v1
                                     .write()
                                     .unwrap()
                             })
@@ -4992,7 +5019,12 @@ impl Bank {
         let program_runtime_environment =
             self.create_program_runtime_environment(&self.feature_set);
         self.transaction_processor
-            .global_program_cache
+            .global_program_cache_v1
+            .write()
+            .unwrap()
+            .latest_root_slot = self.slot;
+        self.transaction_processor
+            .global_program_cache_v2
             .write()
             .unwrap()
             .latest_root_slot = self.slot;
