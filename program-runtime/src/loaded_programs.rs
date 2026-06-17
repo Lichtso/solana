@@ -724,32 +724,32 @@ impl<FG: ForkGraph> ProgramCache<FG> {
             } => {
                 let loading_thread = loading_entries.get_mut().unwrap().remove(&key);
                 debug_assert_eq!(loading_thread, Some((current_slot, thread::current().id())));
-                if current_slot < self.latest_root_slot {
-                    self.loading_task_waiter.notify();
-                    return true;
-                }
-                // Check that it will be visible to our own fork once inserted
-                if loaded_program.deployment_slot > self.latest_root_slot
-                    && !matches!(
-                        self.fork_graph
-                            .as_ref()
-                            .unwrap()
-                            .upgrade()
-                            .unwrap()
-                            .read()
-                            .unwrap()
-                            .relationship(loaded_program.deployment_slot, current_slot),
-                        BlockRelation::Equal | BlockRelation::Ancestor
+                let was_occupied = if current_slot < self.latest_root_slot {
+                    true
+                } else {
+                    // Check that it will be visible to our own fork once inserted
+                    if loaded_program.deployment_slot > self.latest_root_slot
+                        && !matches!(
+                            self.fork_graph
+                                .as_ref()
+                                .unwrap()
+                                .upgrade()
+                                .unwrap()
+                                .read()
+                                .unwrap()
+                                .relationship(loaded_program.deployment_slot, current_slot),
+                            BlockRelation::Equal | BlockRelation::Ancestor
+                        )
+                    {
+                        self.stats.lost_insertions.fetch_add(1, Ordering::Relaxed);
+                    }
+                    self.assign_program(
+                        program_runtime_environment,
+                        key,
+                        last_modification_slot,
+                        loaded_program,
                     )
-                {
-                    self.stats.lost_insertions.fetch_add(1, Ordering::Relaxed);
-                }
-                let was_occupied = self.assign_program(
-                    program_runtime_environment,
-                    key,
-                    last_modification_slot,
-                    loaded_program,
-                );
+                };
                 self.loading_task_waiter.notify();
                 was_occupied
             }
