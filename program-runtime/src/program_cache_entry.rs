@@ -115,7 +115,10 @@ pub enum ProgramCacheEntryType {
     /// Verified program.
     ///
     /// It may or may not be JIT compiled.
-    Loaded(Executable<InvokeContext<'static, 'static>>),
+    Loaded(
+        Executable<InvokeContext<'static, 'static>>,
+        Executable<InvokeContext<'static, 'static>>,
+    ),
     /// A built-in program which is not stored on-chain but backed into and distributed with the validator
     Builtin(BuiltinProgram<InvokeContext<'static, 'static>>),
 }
@@ -129,7 +132,7 @@ impl std::fmt::Debug for ProgramCacheEntryType {
             ProgramCacheEntryType::Closed => "ProgramCacheEntryType::Closed",
             ProgramCacheEntryType::DelayVisibility => "ProgramCacheEntryType::DelayVisibility",
             ProgramCacheEntryType::Unloaded(_) => "ProgramCacheEntryType::Unloaded",
-            ProgramCacheEntryType::Loaded(_) => "ProgramCacheEntryType::Loaded",
+            ProgramCacheEntryType::Loaded(_, _) => "ProgramCacheEntryType::Loaded",
             ProgramCacheEntryType::Builtin(_) => "ProgramCacheEntryType::Builtin",
         })
         .finish()
@@ -140,7 +143,7 @@ impl ProgramCacheEntryType {
     /// Returns a reference to its environment if it has one
     pub fn get_environment(&self) -> Option<&ProgramRuntimeEnvironment> {
         match self {
-            ProgramCacheEntryType::Loaded(program) => {
+            ProgramCacheEntryType::Loaded(program, _) => {
                 Some(ProgramRuntimeEnvironment::from_ref(program.get_loader()))
             }
             ProgramCacheEntryType::FailedVerification(env)
@@ -197,6 +200,7 @@ impl ProgramCacheEntry {
     pub fn load(
         loader_key: &Pubkey,
         program_runtime_environment: ProgramRuntimeEnvironment,
+        dm_program_runtime_environment: ProgramRuntimeEnvironment,
         deployment_slot: Slot,
         elf_bytes: &[u8],
         #[cfg(feature = "metrics")] metrics: &mut LoadProgramMetrics,
@@ -231,10 +235,17 @@ impl ProgramCacheEntry {
             }
         }
 
+        let dm_executable =
+            Executable::load(elf_bytes, Arc::clone(&*dm_program_runtime_environment))?;
+        #[cfg(all(not(target_os = "windows"), target_arch = "x86_64"))]
+        {
+            dm_executable.jit_compile()?;
+        }
+
         Ok(Self {
             deployment_slot,
             account_owner: ProgramCacheEntryOwner::try_from(loader_key).unwrap(),
-            program: ProgramCacheEntryType::Loaded(executable),
+            program: ProgramCacheEntryType::Loaded(executable, dm_executable),
             stats: entry_stats.into(),
             latest_access_slot: AtomicU64::new(0),
         })
@@ -256,7 +267,7 @@ impl ProgramCacheEntry {
 
     pub fn to_unloaded_in_env(&self, environment: ProgramRuntimeEnvironment) -> Option<Self> {
         match &self.program {
-            ProgramCacheEntryType::Loaded(_)
+            ProgramCacheEntryType::Loaded(_, _)
             | ProgramCacheEntryType::FailedVerification(_)
             | ProgramCacheEntryType::Unloaded(_) => {}
             ProgramCacheEntryType::Closed
@@ -353,7 +364,7 @@ impl ProgramCacheEntry {
             | ProgramCacheEntryType::DelayVisibility
             | ProgramCacheEntryType::FailedVerification(_)
             | ProgramCacheEntryType::Builtin(_) => self.deployment_slot,
-            ProgramCacheEntryType::Unloaded(_) | ProgramCacheEntryType::Loaded(_) => self
+            ProgramCacheEntryType::Unloaded(_) | ProgramCacheEntryType::Loaded(_, _) => self
                 .deployment_slot
                 .saturating_add(DELAY_VISIBILITY_SLOT_OFFSET),
         }

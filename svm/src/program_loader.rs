@@ -99,6 +99,7 @@ pub(crate) fn load_program_accounts<CB: TransactionProcessingCallback>(
 pub fn load_program_with_pubkey<CB: TransactionProcessingCallback>(
     callbacks: &CB,
     program_runtime_environment: &ProgramRuntimeEnvironment,
+    dm_program_runtime_environment: &ProgramRuntimeEnvironment,
     pubkey: &Pubkey,
     current_slot: Slot,
     execute_timings: &mut ExecuteTimings,
@@ -120,6 +121,7 @@ pub fn load_program_with_pubkey<CB: TransactionProcessingCallback>(
         ProgramAccountLoadResult::ProgramOfLoaderV1(program_account) => ProgramCacheEntry::load(
             program_account.owner(),
             ProgramRuntimeEnvironment::clone(program_runtime_environment),
+            ProgramRuntimeEnvironment::clone(dm_program_runtime_environment),
             0,
             program_account.data(),
             #[cfg(feature = "metrics")]
@@ -130,6 +132,7 @@ pub fn load_program_with_pubkey<CB: TransactionProcessingCallback>(
         ProgramAccountLoadResult::ProgramOfLoaderV2(program_account) => ProgramCacheEntry::load(
             program_account.owner(),
             ProgramRuntimeEnvironment::clone(program_runtime_environment),
+            ProgramRuntimeEnvironment::clone(dm_program_runtime_environment),
             0,
             program_account.data(),
             #[cfg(feature = "metrics")]
@@ -149,6 +152,7 @@ pub fn load_program_with_pubkey<CB: TransactionProcessingCallback>(
                 ProgramCacheEntry::load(
                     program_account.owner(),
                     ProgramRuntimeEnvironment::clone(program_runtime_environment),
+                    ProgramRuntimeEnvironment::clone(dm_program_runtime_environment),
                     deployment_slot,
                     programdata,
                     #[cfg(feature = "metrics")]
@@ -167,6 +171,7 @@ pub fn load_program_with_pubkey<CB: TransactionProcessingCallback>(
                     ProgramCacheEntry::load(
                         &loader_v4::id(),
                         ProgramRuntimeEnvironment::clone(program_runtime_environment),
+                        ProgramRuntimeEnvironment::clone(dm_program_runtime_environment),
                         deployment_slot,
                         elf_bytes,
                         #[cfg(feature = "metrics")]

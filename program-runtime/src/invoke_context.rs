@@ -920,7 +920,7 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
             let Some(entry) = self.program_cache_for_tx_batch.find(program_id) else {
                 continue;
             };
-            let ProgramCacheEntryType::Loaded(ref executable) = entry.program else {
+            let ProgramCacheEntryType::Loaded(ref executable, _) = entry.program else {
                 continue;
             };
             callback(instruction_context, executable, register_trace.as_slice());

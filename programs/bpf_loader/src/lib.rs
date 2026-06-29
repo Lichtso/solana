@@ -139,7 +139,18 @@ pub(crate) fn process_instruction_inner<'a>(
             ic_logger_msg!(log_collector, "Program is not deployed");
             Err(Box::new(InstructionError::UnsupportedProgramId) as Box<dyn std::error::Error>)
         }
-        ProgramCacheEntryType::Loaded(executable) => execute(executable, invoke_context, &executor),
+        ProgramCacheEntryType::Loaded(executable, dm_executable) => execute(
+            if invoke_context
+                .get_feature_set()
+                .virtual_address_space_adjustments
+            {
+                dm_executable
+            } else {
+                executable
+            },
+            invoke_context,
+            &executor,
+        ),
         _ => Err(Box::new(InstructionError::UnsupportedProgramId) as Box<dyn std::error::Error>),
     }
     .map(|_| 0)
