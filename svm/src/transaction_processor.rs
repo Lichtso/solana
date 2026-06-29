@@ -602,6 +602,9 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                             environment
                                 .program_runtime_environments
                                 .get_env_for_execution(),
+                            environment
+                                .program_runtime_environments
+                                .get_dm_env_for_execution(),
                             &mut program_cache_for_tx_batch,
                             &mut execute_timings,
                             config.limit_to_load_programs,
@@ -965,6 +968,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         account_loader: &AccountLoader<CB>,
         mut missing_programs: Vec<ProgramToLoad>,
         program_runtime_environment_for_execution: &ProgramRuntimeEnvironment,
+        dm_program_runtime_environment_for_execution: &ProgramRuntimeEnvironment,
         program_cache_for_tx_batch: &mut ProgramCacheForTxBatch,
         execute_timings: &mut ExecuteTimings,
         limit_to_load_programs: bool,
@@ -999,6 +1003,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                 let program = load_program_with_pubkey(
                     account_loader,
                     program_runtime_environment_for_execution,
+                    dm_program_runtime_environment_for_execution,
                     &key,
                     self.slot,
                     execute_timings,
@@ -1075,9 +1080,14 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         // Maybe the enqueued program was already loaded and can be skipped.
         if let Some(key) = program_to_load {
             // Load, verify and compile one program.
+            let environments = ProgramRuntimeEnvironments::new(
+                ProgramRuntimeEnvironment::clone(upcoming_environment),
+                ProgramRuntimeEnvironment::clone(upcoming_environment),
+            );
             let recompiled = load_program_with_pubkey(
                 account_loader,
                 upcoming_environment,
+                environments.get_dm_env_for_execution(),
                 &key,
                 self.slot,
                 &mut ExecuteTimings::default(),

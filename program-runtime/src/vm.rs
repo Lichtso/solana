@@ -212,6 +212,11 @@ pub fn execute<'a, 'b: 'a>(
         .get_feature_set()
         .pass_input_metadata_in_vm_r3_r5;
 
+    assert_eq!(
+        executable.get_loader().get_config().aligned_memory_mapping,
+        !virtual_address_space_adjustments
+    );
+
     let mut serialize_time = Measure::start("serialize");
     let SerializationResult {
         parameter_bytes,
