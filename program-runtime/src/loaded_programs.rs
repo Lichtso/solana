@@ -67,6 +67,8 @@ pub struct ProgramRuntimeEnvironments {
     /// Environment compiled for the current epoch in which programs are
     /// executing.
     execution: ProgramRuntimeEnvironment,
+    /// Environment for virtual_address_space_adjustments.
+    dm_execution: ProgramRuntimeEnvironment,
     /// Environment compiled for the epoch of the next slot at which a program
     /// deployed in the current slot will execute.
     deployment: ProgramRuntimeEnvironment,
@@ -79,8 +81,18 @@ impl ProgramRuntimeEnvironments {
         execution: ProgramRuntimeEnvironment,
         deployment: ProgramRuntimeEnvironment,
     ) -> Self {
+        let mut config = (*execution).get_config().clone();
+        config.enable_stack_frame_gaps = false;
+        config.aligned_memory_mapping = false;
+        let mut loader = BuiltinProgram::new_loader(config);
+        for (_key, (name, value)) in (*execution).get_function_registry().iter() {
+            loader
+                .register_function(unsafe { std::str::from_utf8_unchecked(name) }, value)
+                .unwrap();
+        }
         Self {
             execution,
+            dm_execution: ProgramRuntimeEnvironment::from(loader),
             deployment,
         }
     }
@@ -88,6 +100,11 @@ impl ProgramRuntimeEnvironments {
     /// Get the program runtime environment for execution.
     pub fn get_env_for_execution(&self) -> &ProgramRuntimeEnvironment {
         &self.execution
+    }
+
+    /// Get the program runtime environment for virtual_address_space_adjustments.
+    pub fn get_dm_env_for_execution(&self) -> &ProgramRuntimeEnvironment {
+        &self.dm_execution
     }
 
     /// Get the program runtime environment for deployment.
@@ -440,7 +457,7 @@ impl<FG: ForkGraph> ProgramCache<FG> {
                             | (ProgramCacheEntryType::Closed, ProgramCacheEntryType::Unloaded(_))
                             | (
                                 ProgramCacheEntryType::Unloaded(_),
-                                ProgramCacheEntryType::Loaded(_),
+                                ProgramCacheEntryType::Loaded(_, _),
                             )
                             | (
                                 ProgramCacheEntryType::Unloaded(_),
@@ -769,7 +786,7 @@ impl<FG: ForkGraph> ProgramCache<FG> {
                     second_level
                         .iter()
                         .filter_map(move |program| match program.program {
-                            ProgramCacheEntryType::Loaded(_) => Some((*id, 0, program.clone())),
+                            ProgramCacheEntryType::Loaded(_, _) => Some((*id, 0, program.clone())),
                             _ => None,
                         })
                 })
@@ -898,7 +915,7 @@ impl<FG: ForkGraph> ProgramCache<FG> {
                     .expect("Program entry not found");
 
                 // Only loaded entries shall be unloaded by eviction.
-                if let ProgramCacheEntryType::Loaded(_) = candidate.program
+                if let ProgramCacheEntryType::Loaded(_, _) = candidate.program
                     && let Some(unloaded) = candidate.to_unloaded()
                 {
                     if candidate.stats.uses.load(Ordering::Relaxed) == 1 {

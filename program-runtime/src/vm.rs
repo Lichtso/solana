@@ -210,6 +210,11 @@ pub fn execute<'a, 'b: 'a>(
         .get_feature_set()
         .direct_account_pointers_in_program_input;
 
+    assert_eq!(
+        executable.get_loader().get_config().aligned_memory_mapping,
+        !virtual_address_space_adjustments
+    );
+
     let mut serialize_time = Measure::start("serialize");
     let (parameter_bytes, regions, accounts_metadata, instruction_data_offset) =
         serialization::serialize_parameters(
