@@ -1140,6 +1140,9 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
             };
 
             let mut feature_set = environment.feature_set;
+            feature_set.syscall_parameter_address_restrictions = true;
+            feature_set.virtual_address_space_adjustments = true;
+            feature_set.account_data_direct_mapping = true;
 
             *program_cache_for_tx_batch = program_cache_for_tx_batch_before_tx.clone();
             let sysvar_cache = &self.sysvar_cache.read().unwrap();
