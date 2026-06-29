@@ -183,7 +183,7 @@ impl<FG: ForkGraph> ProgramCache<FG> {
                             | (ProgramCacheEntryType::Closed, ProgramCacheEntryType::Unloaded(_))
                             | (
                                 ProgramCacheEntryType::Unloaded(_),
-                                ProgramCacheEntryType::Loaded(_),
+                                ProgramCacheEntryType::Loaded(_, _),
                             )
                             | (
                                 ProgramCacheEntryType::Unloaded(_),
@@ -481,7 +481,7 @@ impl<FG: ForkGraph> ProgramCache<FG> {
                     second_level
                         .iter()
                         .filter_map(move |program| match program.program {
-                            ProgramCacheEntryType::Loaded(_) => Some((*id, program.clone())),
+                            ProgramCacheEntryType::Loaded(_, _) => Some((*id, program.clone())),
                             _ => None,
                         })
                 })
@@ -603,7 +603,7 @@ impl<FG: ForkGraph> ProgramCache<FG> {
                     .expect("Program entry not found");
 
                 // Only loaded entries shall be unloaded by eviction.
-                if let ProgramCacheEntryType::Loaded(_) = candidate.program
+                if let ProgramCacheEntryType::Loaded(_, _) = candidate.program
                     && let Some(unloaded) = candidate.to_unloaded()
                 {
                     if candidate.stats.uses.load(Ordering::Relaxed) == 1 {
