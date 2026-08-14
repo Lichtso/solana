@@ -290,6 +290,10 @@ pub fn execute<'a, 'b: 'a>(
             execution_mode = ExecutionMode::Interpreted;
         }
 
+        if invoke_context.enable_register_tracing {
+            execution_mode = ExecutionMode::Interpreted;
+        }
+
         let compute_meter_prev = invoke_context.get_remaining();
         let (mut vm, stack, heap) = unsafe {
             // SAFETY: The `stack`, `heap` and `executable` live past the lifetime of

@@ -1399,6 +1399,75 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                         }
                     }
                 }
+
+                if cause.contains("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4") {
+                    writeln!(buffer, "    Recording SBPF instruction trace").unwrap();
+                    drop(buffer);
+                    for dm in [false, true] {
+                        transaction_accounts = transaction_accounts_before_tx
+                            .iter()
+                            .map(|(key, acc)| (key.clone(), acc.clone()))
+                            .collect::<Vec<_>>();
+                        let mut transaction_context = TransactionContext::new(
+                            transaction_accounts,
+                            environment.rent.clone(),
+                            compute_budget.max_instruction_stack_depth,
+                            compute_budget.max_instruction_trace_length,
+                            tx.num_instructions(),
+                        );
+
+                        let log_collector = match config.log_messages_bytes_limit {
+                            None => Some(LogCollector::new_ref()),
+                            Some(log_messages_bytes_limit) => Some(LogCollector::new_ref_with_limit(Some(
+                                log_messages_bytes_limit,
+                            ))),
+                        };
+
+                        let mut feature_set = environment.feature_set;
+                        if dm {
+                            feature_set.syscall_parameter_address_restrictions = true;
+                            feature_set.virtual_address_space_adjustments = true;
+                            feature_set.account_data_direct_mapping = true;
+                        }
+
+                        let sysvar_cache = &self.sysvar_cache.read().unwrap();
+                        *program_cache_for_tx_batch = program_cache_for_tx_batch_before_tx.clone();
+                        let mut invoke_context = InvokeContext::new(
+                            &mut transaction_context,
+                            program_cache_for_tx_batch,
+                            EnvironmentConfig::new(
+                                environment.blockhash,
+                                environment.blockhash_lamports_per_signature,
+                                environment.alpenglow_migration_succeeded,
+                                callback,
+                                &feature_set,
+                                &environment.program_runtime_environments,
+                                sysvar_cache,
+                            ),
+                            log_collector.clone(),
+                            compute_budget,
+                            self.execution_cost,
+                        );
+                        invoke_context.enable_register_tracing = true;
+
+                        let mut execute_timings = execute_timings.clone();
+                        let mut executed_units = 0u64;
+                        let _ = invoke_context.process_message(tx, &mut execute_timings, &mut executed_units);
+                        invoke_context.iterate_vm_traces(&|instruction_context, executable, register_trace| {
+                            let mut file = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(format!("/home/sol/logs/{}_{}.log", tx.signature(), dm))
+                                .unwrap();
+                            writeln!(file, "{:?}", instruction_context.get_program_key()).unwrap();
+                            let analysis = solana_sbpf::static_analysis::Analysis::from_executable(&executable).unwrap();
+                            analysis
+                                .disassemble_register_trace(&mut file, register_trace)
+                                .unwrap();
+                        });
+                        drop(invoke_context);
+                    }
+                }
             }
         }
 
