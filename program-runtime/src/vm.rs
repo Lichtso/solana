@@ -300,6 +300,10 @@ pub fn execute<'a, 'b: 'a>(
             execution_mode = ExecutionMode::Interpreted;
         }
 
+        if invoke_context.enable_register_tracing {
+            execution_mode = ExecutionMode::Interpreted;
+        }
+
         let compute_meter_prev = invoke_context.get_remaining();
         let mapped_heap_len = invoke_context.get_compute_budget().heap_size as usize;
         let (mut vm, stack, heap) = unsafe {

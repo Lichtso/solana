@@ -214,6 +214,7 @@ pub struct InvokeContext<'a, 'ix_data> {
     /// Debug port to use for this executing transaction.
     #[cfg(feature = "sbpf-debugger")]
     pub debug_port: Option<u16>,
+    pub enable_register_tracing: bool,
 }
 
 impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
@@ -238,6 +239,7 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
             register_traces: Vec::new(),
             #[cfg(feature = "sbpf-debugger")]
             debug_port: None,
+            enable_register_tracing: false,
         }
     }
 
