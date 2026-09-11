@@ -1080,12 +1080,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         let enable_second_replay = true;
         let log_collector = if config.recording_config.enable_log_recording || enable_second_replay
         {
-            match config.log_messages_bytes_limit {
-                None => Some(LogCollector::new_ref()),
-                Some(log_messages_bytes_limit) => Some(LogCollector::new_ref_with_limit(Some(
-                    log_messages_bytes_limit,
-                ))),
-            }
+            Some(LogCollector::new_ref())
         } else {
             None
         };
@@ -1132,12 +1127,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                 tx.num_instructions(),
             );
 
-            let log_collector = match config.log_messages_bytes_limit {
-                None => Some(LogCollector::new_ref()),
-                Some(log_messages_bytes_limit) => Some(LogCollector::new_ref_with_limit(Some(
-                    log_messages_bytes_limit,
-                ))),
-            };
+            let log_collector = Some(LogCollector::new_ref());
 
             let mut feature_set = environment.feature_set;
 
