@@ -18,6 +18,7 @@ use {
         elf::Executable,
         error::{EbpfError, ProgramResult},
         memory_region::{AccessType, MemoryMapping, MemoryRegion},
+        program::SBPFVersion,
         vm::{ContextObject, EbpfVm, ExecutionMode},
     },
     solana_sdk_ids::bpf_loader_deprecated,
@@ -278,7 +279,11 @@ pub fn execute<'a, 'b: 'a>(
     };
 
     let execution_result = {
-        let mut execution_mode = ExecutionMode::PreferJit;
+        let mut execution_mode = if executable.get_sbpf_version() == SBPFVersion::V3 {
+            ExecutionMode::TokenThreadingInterpreted
+        } else {
+            ExecutionMode::Jit
+        };
 
         #[cfg(feature = "sbpf-debugger")]
         if invoke_context.debug_port.is_some() {
@@ -341,6 +346,7 @@ pub fn execute<'a, 'b: 'a>(
         invoke_context.timings.execute_us += this_call_us;
         match execution_mode {
             ExecutionMode::Interpreted => cache_entry.stats.interpreter_executed(this_call_us),
+            ExecutionMode::TokenThreadingInterpreted => cache_entry.stats.token_threading_interpreter_executed(this_call_us),
             ExecutionMode::Jit => cache_entry.stats.jit_executed(this_call_us),
             ExecutionMode::PreferJit => { /* not actually executed? */ }
         }
