@@ -28,6 +28,11 @@ pub struct ProgramStatistics {
     pub total_interpretation_time_us: AtomicU64,
     /// Exponential moving average of the interpreted execution time.
     pub interpretation_time_ema: AtomicU64,
+
+    pub token_threading_interpreted_invocations: AtomicU64,
+    pub total_token_threading_interpretation_time_us: AtomicU64,
+    /// Exponential moving average of the token threading interpreted execution time.
+    pub token_threading_interpretation_time_ema: AtomicU64,
 }
 
 /// Number of compilation observations contributing to the the [`Self::compilation_time_ema`].
@@ -96,6 +101,15 @@ impl ProgramStatistics {
         Self::observe_ema::<EXECUTION_EMA_WINDOW_SIZE>(&self.interpretation_time_ema, duration_us);
     }
 
+    /// Record information about program executed with the token threading interpreter.
+    pub fn token_threading_interpreter_executed(&self, duration_us: u64) {
+        let ord = Ordering::Relaxed;
+        self.token_threading_interpreted_invocations.fetch_add(1, ord);
+        self.total_token_threading_interpretation_time_us
+            .fetch_add(duration_us, ord);
+        Self::observe_ema::<EXECUTION_EMA_WINDOW_SIZE>(&self.token_threading_interpretation_time_ema, duration_us);
+    }
+
     pub fn merge_from(&self, other: &ProgramStatistics) {
         let ord = Ordering::Relaxed;
         self.uses.fetch_add(other.uses.load(ord), ord);
@@ -113,6 +127,12 @@ impl ProgramStatistics {
             .fetch_add(other_interpretations, ord);
         self.total_interpretation_time_us
             .fetch_add(other.total_interpretation_time_us.load(ord), ord);
+        let other_token_threading_interpretations = other.interpreted_invocations.load(ord);
+        let this_token_threading_interpretations = self
+            .token_threading_interpreted_invocations
+            .fetch_add(other_token_threading_interpretations, ord);
+        self.total_token_threading_interpretation_time_us
+            .fetch_add(other.total_token_threading_interpretation_time_us.load(ord), ord);
         if let Some(comp_ema) = ProgramCacheStats::combined_ema::<
             COMPILATION_EMA_WINDOW_SIZE,
             COMPILATION_EMA_WINDOW_SIZE,
@@ -143,6 +163,16 @@ impl ProgramStatistics {
             )
         {
             self.interpretation_time_ema.store(interp_ema, ord);
+        }
+        if let Some(interp_ema) =
+            ProgramCacheStats::combined_ema::<EXECUTION_EMA_WINDOW_SIZE, EXECUTION_EMA_WINDOW_SIZE>(
+                &self.token_threading_interpretation_time_ema,
+                &other.token_threading_interpretation_time_ema,
+                this_token_threading_interpretations,
+                other_token_threading_interpretations,
+            )
+        {
+            self.token_threading_interpretation_time_ema.store(interp_ema, ord);
         }
     }
 }
@@ -312,10 +342,13 @@ impl<FG: ForkGraph> crate::loaded_programs::ProgramCache<FG> {
             let interps = stats.interpreted_invocations.load(Ordering::Relaxed);
             let interptime = stats.total_interpretation_time_us.load(Ordering::Relaxed);
             let interpema = stats.interpretation_time_ema.load(Ordering::Relaxed) / EMA_SCALE;
+            let ttinterps = stats.token_threading_interpreted_invocations.load(Ordering::Relaxed);
+            let ttinterptime = stats.total_token_threading_interpretation_time_us.load(Ordering::Relaxed);
+            let ttinterpema = stats.token_threading_interpretation_time_ema.load(Ordering::Relaxed) / EMA_SCALE;
             let _ = writeln!(
                 &mut output,
                 "{addr},{entry_ty},{uses},{compiles},{comptime},{comptime_ema},{invokes},\
-                 {jittime},{jittime_ema},{interps},{interptime},{interpema}"
+                 {jittime},{jittime_ema},{interps},{interptime},{interpema},{ttinterps},{ttinterptime},{ttinterpema}"
             );
         }
         if let Err(e) = std::fs::write(stat_path, output) {
